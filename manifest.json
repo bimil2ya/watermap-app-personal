@@ -1,0 +1,24 @@
+{
+  "name": "물지도 전자야장",
+  "short_name": "물지도야장",
+  "description": "물지도 산림 현장조사 전자야장",
+  "start_url": "./watermap_V100.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0A5C45",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
