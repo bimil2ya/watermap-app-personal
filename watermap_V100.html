@@ -3160,19 +3160,33 @@ async function saveData() {
 }
 
 // ====== Apps Script 전송 ======
+// 45초 타임아웃 — base64 인코딩된 사진 payload가 수 MB이고 Apps Script는 콜드스타트 시 느릴 수 있어 넉넉하게 잡는다.
+// 요청이 timeout 전에 정상적으로 끝나도 타이머를 지워 불필요한 abort() 호출이 남지 않게 한다.
+function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
+// 서버가 JSON 응답까지 정상 완료하고 스스로 "실패"라고 답한 경우(=서버가 이 요청의 처리를 끝냈다는 뜻)만 구분해서 던진다.
+// class만 만들면 .name이 자동으로 채워지지 않으므로 생성자에서 직접 설정한다.
+class ServerRejectedError extends Error {
+  constructor(message) { super(message); this.name = 'ServerRejectedError'; }
+}
+
 // 실패 시 에러 throw (flushOfflineQueue에서 failed 처리용)
 function sendToScript(scriptUrl, payload) {
-  return fetch(scriptUrl, {
+  return fetchWithTimeout(scriptUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify(payload)
-  }).then(function(r) {
+  }, 45000).then(function(r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function(data) {
-    // Apps Script가 status:error 반환 시 예외 처리
+    // Apps Script가 status:error 반환 시 예외 처리 — 서버가 명시적으로 거부한 경우만 ServerRejectedError로 구분
     if (data && data.status === 'error') {
-      throw new Error(data.message || '업로드 실패');
+      throw new ServerRejectedError(data.message || '업로드 실패');
     }
     // status:warn 은 드라이브 저장 성공, 시트 기록 실패 → 경고만 표시
     if (data && data.status === 'warn') {
@@ -3182,13 +3196,15 @@ function sendToScript(scriptUrl, payload) {
   });
 }
 
-// 실패 시 기본값 반환 (중복확인 등 응답값 필요한 곳)
+// 실패 시 기본값 반환 (중복확인 등 응답값 필요한 곳) — timeout(AbortError)을 포함해 fetch 자체가 reject하거나
+// 응답 바디가 유효한 JSON이 아닐 때만 {status:'ok'}로 흡수한다. HTTP 상태 오류는 확인하지 않으므로, 바디가
+// 유효한 JSON이면 그 내용이 그대로 반환된다(이 동작은 기존 그대로 유지 — 이 함수는 바꾸지 않는다).
 function sendToScriptSafe(scriptUrl, payload) {
-  return fetch(scriptUrl, {
+  return fetchWithTimeout(scriptUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify(payload)
-  }).then(function(r) { return r.json(); }).catch(function() { return { status: 'ok' }; });
+  }, 45000).then(function(r) { return r.json(); }).catch(function() { return { status: 'ok' }; });
 }
 function wgs84ToEpsg5186(lat, lng) {
   const deg2rad = Math.PI / 180;
