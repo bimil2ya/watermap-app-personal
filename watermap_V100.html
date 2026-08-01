@@ -2587,6 +2587,14 @@ function buildTreePayload(rec) {
   return { type: 'tree', rows: rec.treeRows, overwrite: true };
 }
 
+// 업로드 실패 사유 기록 구조 — soil/tree는 단일 { message, atMs, at } | null, photos는 filename별 맵.
+// 기존(이 기능 배포 전) 레코드에는 uploadErrors 필드 자체가 없을 수 있으므로 항상 이 헬퍼를 거쳐 접근한다.
+function ensureUploadErrors(rec) {
+  if (!rec.uploadErrors) rec.uploadErrors = { soil: null, tree: null, photos: {} };
+  if (!rec.uploadErrors.photos) rec.uploadErrors.photos = {};
+  return rec.uploadErrors;
+}
+
 // 앱이 백그라운드로 전환되면(카메라 전환, 화면 잠금, 다른 앱 전환 등) 그 이후로는 계속 visible 상태가 아니었더라도
 // 다시 돌아왔을 때 자동으로 이어서 전송하지 않는다 — 한 번이라도 hidden이 됐었는지를 기억하는 sticky 플래그.
 // "미전송 전송"/"재업로드"를 사용자가 다시 누를 때만 false로 되돌린다.
@@ -2652,11 +2660,16 @@ async function autoRetryUpload() {
               if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return; // 늦게 도착한 예전 시도의 응답 — 현재 상태를 건드리지 않음
               r.soilUploaded = true;
               r.soilFingerprint = attemptedSoilFingerprint;
+              ensureUploadErrors(r).soil = null;
               refreshSynced(r);
             });
           } catch (err) {
             recordFailed = true;
-            // 실패 기록은 2단계에서 이 catch를 채운다(자동 재전송 없음)
+            // 자동으로 재전송하지 않는다 — 실패 사유만 기록(늦은 응답이면 무시)
+            patchRecord(rec.id, r => {
+              if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return;
+              ensureUploadErrors(r).soil = { message: String(err.message || err).slice(0, 250), atMs: Date.now(), at: new Date().toLocaleString('ko-KR') };
+            });
           }
         }
       }
@@ -2673,11 +2686,15 @@ async function autoRetryUpload() {
               if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
               r.treeUploaded = true;
               r.treeFingerprint = attemptedTreeFingerprint;
+              ensureUploadErrors(r).tree = null;
               refreshSynced(r);
             });
           } catch (err) {
             recordFailed = true;
-            // 실패 기록은 2단계에서 이 catch를 채운다(자동 재전송 없음)
+            patchRecord(rec.id, r => {
+              if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
+              ensureUploadErrors(r).tree = { message: String(err.message || err).slice(0, 250), atMs: Date.now(), at: new Date().toLocaleString('ko-KR') };
+            });
           }
         }
       }
@@ -3099,17 +3116,43 @@ async function saveData() {
     }
   }
 
+  // 수정 모드: soil/tree 데이터가 실제로 안 바뀌었으면 이미 성공한 상태를 그대로 유지하고,
+  // 바뀌었으면(지문이 달라졌으면) 원래 앱 의도대로 false로 리셋해 재검증을 유도한다.
+  const newSoilFingerprint = fingerprintFromPayload(buildSoilPayload({ soilRow }));
+  const newTreeFingerprint = fingerprintFromPayload(buildTreePayload({ treeRows }));
+  const soilUnchanged = !!existingRec2 && existingRec2.soilFingerprint === newSoilFingerprint;
+  const treeUnchanged = !!existingRec2 && existingRec2.treeFingerprint === newTreeFingerprint;
+  const soilUploaded = soilUnchanged ? !!existingRec2.soilUploaded : false;
+  const treeUploaded = treeUnchanged ? !!existingRec2.treeUploaded : false;
+
+  // 재촬영한 사진의 오래된 오류는 이어받지 않는다 — filename도 남아있고 captureId도 그대로일 때만 유효한 오류
+  const currentCaptureIds = {};
+  photoList.forEach(p => { currentCaptureIds[p.filename] = p.captureId; });
+  const oldPhotoErrors = existingRec2?.uploadErrors?.photos || {};
+  const filteredPhotoErrors = {};
+  Object.entries(oldPhotoErrors).forEach(([fn, err]) => {
+    if (currentCaptureIds.hasOwnProperty(fn) && err.captureId === currentCaptureIds[fn]) {
+      filteredPhotoErrors[fn] = err;
+    }
+  });
+
   const newRecord = {
     id: existingRec2 ? existingRec2.id : Date.now(),
     plotNo, date: soilRow[3], basin: soilRow[0],
     soilRow, treeRows,
     photoList,
-    synced: false,
-    // 수정 모드: 업로드 상태를 false로 리셋해서 재업로드 유도
-    soilUploaded: false,
-    treeUploaded: false,
+    soilUploaded,
+    treeUploaded,
+    soilFingerprint: newSoilFingerprint,
+    treeFingerprint: newTreeFingerprint,
+    uploadErrors: {
+      soil: soilUnchanged ? (existingRec2.uploadErrors?.soil || null) : null,
+      tree: treeUnchanged ? (existingRec2.uploadErrors?.tree || null) : null,
+      photos: filteredPhotoErrors
+    },
     savedAt: new Date().toLocaleString('ko-KR')
   };
+  refreshSynced(newRecord); // soilUploaded/treeUploaded/photoList가 모두 확정된 뒤 계산
   if (existingIdx !== -1) {
     records[existingIdx] = newRecord;
   } else {
@@ -5360,6 +5403,7 @@ async function reuploadRecord(id) {
   const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
   let interrupted = false;
+  let recordFailed = false;
   try {
     // 입지토양 미완료 시 재업로드 — 전송 직전 최신 레코드로 다시 확인(다른 탭이 그 사이 이미 완료시켰을 수 있음)
     if (!shouldContinueUpload()) { interrupted = true; }
@@ -5368,13 +5412,22 @@ async function reuploadRecord(id) {
       if (freshSoilRec && !freshSoilRec.soilUploaded && freshSoilRec.soilRow) {
         const soilPayload = buildSoilPayload(freshSoilRec);
         const attemptedSoilFingerprint = fingerprintFromPayload(soilPayload);
-        await sendToScript(scriptUrl, soilPayload);
-        patchRecord(id, r => {
-          if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return; // 늦게 도착한 예전 시도의 응답 — 현재 상태를 건드리지 않음
-          r.soilUploaded = true;
-          r.soilFingerprint = attemptedSoilFingerprint;
-          refreshSynced(r);
-        });
+        try {
+          await sendToScript(scriptUrl, soilPayload);
+          patchRecord(id, r => {
+            if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return; // 늦게 도착한 예전 시도의 응답 — 현재 상태를 건드리지 않음
+            r.soilUploaded = true;
+            r.soilFingerprint = attemptedSoilFingerprint;
+            ensureUploadErrors(r).soil = null;
+            refreshSynced(r);
+          });
+        } catch (err) {
+          recordFailed = true;
+          patchRecord(id, r => {
+            if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return;
+            ensureUploadErrors(r).soil = { message: String(err.message || err).slice(0, 250), atMs: Date.now(), at: new Date().toLocaleString('ko-KR') };
+          });
+        }
       }
     }
     // 임목조사 미완료 시 재업로드 — 동일 패턴
@@ -5384,13 +5437,22 @@ async function reuploadRecord(id) {
       if (freshTreeRec && !freshTreeRec.treeUploaded && freshTreeRec.treeRows && freshTreeRec.treeRows.length > 0) {
         const treePayload = buildTreePayload(freshTreeRec);
         const attemptedTreeFingerprint = fingerprintFromPayload(treePayload);
-        await sendToScript(scriptUrl, treePayload);
-        patchRecord(id, r => {
-          if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
-          r.treeUploaded = true;
-          r.treeFingerprint = attemptedTreeFingerprint;
-          refreshSynced(r);
-        });
+        try {
+          await sendToScript(scriptUrl, treePayload);
+          patchRecord(id, r => {
+            if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
+            r.treeUploaded = true;
+            r.treeFingerprint = attemptedTreeFingerprint;
+            ensureUploadErrors(r).tree = null;
+            refreshSynced(r);
+          });
+        } catch (err) {
+          recordFailed = true;
+          patchRecord(id, r => {
+            if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
+            ensureUploadErrors(r).tree = { message: String(err.message || err).slice(0, 250), atMs: Date.now(), at: new Date().toLocaleString('ko-KR') };
+          });
+        }
       }
     }
     // 사진 미완료 시 재업로드
@@ -5473,8 +5535,11 @@ async function reuploadRecord(id) {
     }
     // soil/tree/사진 각각 성공 시점에 patchRecord로 이미 즉시 반영됨 — 오래된 rec 통째 재저장 없음
     // 인터럽트로 중단됐으면 "완료"를 통보하거나 캐시를 정리하지 않는다 — 아직 안 끝났을 뿐이므로
+    // soil/tree 중 하나라도 실패했으면(자동 재전송 없음) 완료로 통보하지 않는다
     if (interrupted) {
       showToast('⏸️ 앱이 백그라운드로 전환돼 재업로드를 중단했습니다 — 다시 시도해주세요', 'info');
+    } else if (recordFailed) {
+      showToast('⚠️ ' + rec.plotNo + ' 입지·토양/임목조사 일부 실패 — 저장목록에서 사유를 확인하고 다시 시도해주세요', 'error');
     } else {
       showToast('✅ ' + rec.plotNo + ' 재업로드 완료!', 'success');
       // 모든 사진 성공 시 IDB 원본 클리어 (다음 조사지 빈 슬롯 정확히 인식)
