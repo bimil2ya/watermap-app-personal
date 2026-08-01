@@ -5590,39 +5590,32 @@ async function reuploadRecord(id) {
       for (const p of rec.photoList) {
         if (!shouldContinueUpload()) { interrupted = true; break; }
         if (p.uploaded) continue;
-        const isMove = p.filename.includes('기존현황');
-        const slotIdx = isMove
-          ? ['N_기존현황','E_기존현황','S_기존현황','W_기존현황'].findIndex(s => p.filename.includes('(' + s + ')'))
-          : PHOTO_SLOTS.findIndex(s => p.filename.includes('(' + s + ')'));
-
-        // 드라이브에 이미 파일이 있는지 먼저 확인
-        try {
-          const checkResult = await sendToScriptSafe(scriptUrl, {
-            type: 'photoCheck', filename: p.filename, folderId,
-            plotNo, teamCode, weekCode
-          });
-          if (checkResult && checkResult.exists) {
-            // 드라이브에 이미 있으면 완료 처리 + orig 키 클리어 — 오래된 rec 통째 재저장 대신 patchRecord로 이 항목만 갱신
-            p.uploaded = true;
-            patchRecord(id, r => {
-              const item = (r.photoList || []).find(x => x.filename === p.filename);
-              if (item) item.uploaded = true;
-              refreshSynced(r);
-            });
-            // 드라이브 확인 성공 → orig_plotNo_N 클리어
-            if (slotIdx >= 0) {
-              const origKey = isMove ? idbMoveOrigKey(plotNo, slotIdx) : idbOrigKey(plotNo, slotIdx);
-              idbDelete(origKey).catch(() => {});
-            }
-            continue;
-          }
-        } catch(e) { /* 확인 실패 시 업로드 시도 */ }
 
         const slot = resolvePhotoSlot(plotNo, p.filename);
         if (!slot) {
           const recorded = recordPhotoError(id, p.filename, p.captureId, { message: '사진 슬롯을 식별할 수 없습니다', checkFailed: false });
           if (recorded) failedPhotos++;
           continue;
+        }
+
+        const attemptedCaptureId = p.captureId;
+
+        // (b) 재촬영본이 아니고 이전에 애매한 시도도 없었으면: 기존 느슨한 사전 확인을 그대로 사용(회귀 없음).
+        // exists:true면 여기서 곧장 종결 — 실제 POST/uploadPhotoWithRecovery는 거치지 않는다.
+        // (a) 재촬영본(forceUpload)이면 이 확인을 완전히 건너뛴다 — exists:true가 예전 파일일 수 있어 신뢰할 수 없다.
+        // (c) 이전에 애매한 시도가 있었으면(unconfirmedAttempt) 이 확인을 건너뛴다 — 같은 목적의 확인이
+        //     uploadPhotoWithRecovery 내부(0-1)에서 엄격한 버전으로 한 번 더 나가는 걸 막기 위함.
+        if (!p.forceUpload && !p.unconfirmedAttempt) {
+          try {
+            const checkResult = await sendToScriptSafe(scriptUrl, {
+              type: 'photoCheck', filename: p.filename, folderId,
+              plotNo, teamCode, weekCode
+            });
+            if (checkResult && checkResult.exists) {
+              finalizePhotoSuccess(id, plotNo, p.filename, attemptedCaptureId);
+              continue;
+            }
+          } catch (e) { /* 확인 실패 시 아래에서 업로드 시도 */ }
         }
 
         // IDB에서 사진 데이터 찾기 — 원본 우선, 없으면 보조 캐시(captureId 일치할 때만 신뢰)
@@ -5649,7 +5642,6 @@ async function reuploadRecord(id) {
 
         donePhotos++;
         showToast(`📷 ${plotNo} 사진 재업로드 중... ${donePhotos}/${totalPhotos}`, 'info');
-        const attemptedCaptureId = p.captureId;
         const result = await uploadPhotoWithRecovery(scriptUrl, { base64, filename: p.filename, plotNo, teamCode, weekCode, folderId }, id, p);
         if (result.success) {
           finalizePhotoSuccess(id, plotNo, p.filename, attemptedCaptureId);
