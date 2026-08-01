@@ -2923,27 +2923,80 @@ async function saveData() {
     soilRow[9] = existingRec2.soilRow[9]; // Y좌표
   }
 
-  // 수정 모드: 기존에 업로드된 사진 목록 유지, 새로 추가된 사진만 uploaded:false
-  let photoList;
-  if (existingRec2 && existingRec2.photoList && existingRec2.photoList.length > 0) {
-    // 기존 사진 목록 유지 (업로드 상태 보존)
-    const existingPhotoMap = {};
-    existingRec2.photoList.forEach(p => { existingPhotoMap[p.filename] = p; });
-    const newPhotos = [
-      ...Object.values(photoData).map(p => p.filename),
-      ...Object.values(movePhotoData).map(p => p.filename)
-    ];
-    // 새로 찍은 사진은 uploaded:false, 기존 유지 사진은 상태 그대로
-    photoList = newPhotos.map(fn => existingPhotoMap[fn] || { filename: fn, uploaded: false });
-    // 기존 목록에만 있던 사진도 유지
-    existingRec2.photoList.forEach(p => {
-      if (!newPhotos.includes(p.filename)) photoList.push(p);
-    });
-  } else {
-    photoList = [
-      ...Object.values(photoData).map(p => ({ filename: p.filename, uploaded: false })),
-      ...Object.values(movePhotoData).map(p => ({ filename: p.filename, uploaded: false }))
-    ];
+  // 재촬영/첫촬영/재저장 3분기 판정 — captureId로 "진짜 재촬영"과 "단순 재저장"을 구분한다
+  const existingPhotoMap = {};
+  (existingRec2?.photoList || []).forEach(p => { existingPhotoMap[p.filename] = p; });
+
+  const newFilenames = [
+    ...Object.values(photoData).map(p => p.filename),
+    ...Object.values(movePhotoData).map(p => p.filename)
+  ];
+
+  async function mergePhotoItem(filename) {
+    const prev = existingPhotoMap[filename] || null;
+    const slot = resolvePhotoSlot(plotNo, filename);
+    const origData = slot ? await idbGet(slot.slotOrigKey) : undefined;
+    const hasOrig = !!origData;
+    if (hasOrig && prev && prev.captureId !== origData.captureId) {
+      // 이전 저장 시점의 captureId와 다름 — 진짜로 다시 촬영함, 존재확인 신뢰 금지
+      return { filename, uploaded: false, forceUpload: true, cooldownUntil: null, unconfirmedAttempt: false, captureId: origData.captureId };
+    } else if (prev) {
+      // 재촬영이 아님(같은 캡처로 재저장했거나, 이미 업로드되어 idbOrigKey가 지워진 경우) — 기존 상태 그대로 유지
+      return prev;
+    } else {
+      // 처음 촬영 — 비교할 "예전 저장"이 아예 없으므로 재촬영과 다르게 취급
+      return { filename, uploaded: false, forceUpload: false, cooldownUntil: null, unconfirmedAttempt: false, captureId: hasOrig ? origData.captureId : null };
+    }
+  }
+
+  const photoList = await Promise.all(newFilenames.map(mergePhotoItem));
+  // 기존 목록에만 있고 이번엔 새로 안 찍은 사진도 유지 — 단, UI에서 명시적으로 삭제한 사진은 되살리지 않는다
+  (existingRec2?.photoList || []).forEach(p => {
+    if (!newFilenames.includes(p.filename) && !deletedPhotoFilenames.has(p.filename)) {
+      photoList.push(p);
+    }
+  });
+
+  // 저장 직전 최종 원본 존재·내용 재검증 — leftover 포함 최종 photoList 전체를 대상으로,
+  // 아직 업로드되지 않은 항목만 골라 원본이 실제로 전송 가능한 상태인지 확인한다.
+  {
+    const pendingUploaded = photoList.filter(p => !p.uploaded);
+    const missingOriginals = []; // 슬롯 식별은 됐지만 원본이 없거나 손상된 항목의 { id }
+    const unidentifiable = []; // 슬롯 자체를 식별 못 한 항목의 filename
+    for (const p of pendingUploaded) {
+      const slot = resolvePhotoSlot(plotNo, p.filename);
+      if (!slot) { unidentifiable.push(p.filename); continue; }
+      const stored = await idbGet(slot.slotOrigKey);
+      const corrupted = !stored?.base64 || stored.filename !== p.filename || (p.captureId && stored.captureId !== p.captureId);
+      if (corrupted) {
+        const domId = slot.isMove ? 'photo-move-slot-' + slot.slotIdx : 'photo-slot-' + slot.slotIdx;
+        missingOriginals.push({ id: domId });
+      }
+    }
+    if (unidentifiable.length > 0 || missingOriginals.length > 0) {
+      missingOriginals.forEach(s => {
+        const el = document.getElementById(s.id);
+        if (el) el.classList.add('photo-required-error');
+      });
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-photo').classList.add('active');
+      document.querySelectorAll('.nav-btn')[2].classList.add('active');
+      currentTab = 'tab-photo';
+      if (missingOriginals.length > 0) {
+        document.getElementById(missingOriginals[0].id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      if (missingOriginals.length > 0) {
+        showToast(`📷 원본을 찾을 수 없는 사진이 ${missingOriginals.length}장 있습니다 — 다시 촬영해주세요`, 'error');
+      }
+      if (unidentifiable.length > 0) {
+        showToast(`📷 사진 파일명을 인식할 수 없는 항목이 ${unidentifiable.length}장 있습니다 — 해당 사진을 다시 촬영해주세요`, 'error');
+      }
+      btn.disabled = false;
+      btn.textContent = '저장';
+      _isUploading = false;
+      return;
+    }
   }
 
   const newRecord = {
@@ -2963,6 +3016,7 @@ async function saveData() {
     records.push(newRecord);
   }
   localStorage.setItem('survey_records', JSON.stringify(records));
+  deletedPhotoFilenames = new Set(); // 저장이 실제로 반영됐으므로 이번 세션의 삭제 의도 기록을 정리한다
 
   // 수정 모드: 기존에 업로드된 사진이 있었는지 (ZIP 재다운로드 여부 판단용)
   const isEditMode2 = existingRec2 && existingRec2.photoList &&
