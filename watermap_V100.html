@@ -2466,7 +2466,6 @@ function updateOnlineStatus() {
   const banner = document.getElementById('offline-banner');
   if (navigator.onLine) {
     banner.classList.remove('show');
-    flushOfflineQueue();
   } else {
     banner.classList.add('show');
   }
