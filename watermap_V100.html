@@ -2587,6 +2587,18 @@ function buildTreePayload(rec) {
   return { type: 'tree', rows: rec.treeRows, overwrite: true };
 }
 
+// 앱이 백그라운드로 전환되면(카메라 전환, 화면 잠금, 다른 앱 전환 등) 그 이후로는 계속 visible 상태가 아니었더라도
+// 다시 돌아왔을 때 자동으로 이어서 전송하지 않는다 — 한 번이라도 hidden이 됐었는지를 기억하는 sticky 플래그.
+// "미전송 전송"/"재업로드"를 사용자가 다시 누를 때만 false로 되돌린다.
+let uploadInterruptedByHidden = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && _isUploading) {
+    uploadInterruptedByHidden = true;
+    saveDraft();
+  }
+});
+function shouldContinueUpload() { return !uploadInterruptedByHidden; }
+
 // ====== 저장목록 탭 "미전송 N건 전송" 버튼으로 수동 실행 (자동 트리거 없음) ======
 async function autoRetryUpload() {
   if (!navigator.onLine) return;
@@ -2611,8 +2623,10 @@ async function autoRetryUpload() {
   let successCount = 0;
   let failedCount = 0;
   let failedPhotoCount = 0;
+  let interrupted = false; // 함수 전체에 걸쳐 하나뿐 — 한 번 true가 되면 끝까지 유지된다
 
   for (const rec of incomplete) {
+    if (!shouldContinueUpload()) { interrupted = true; break; }
     let recordFailed = false;
     let recordPhotoFailed = 0;
     try {
@@ -2626,6 +2640,7 @@ async function autoRetryUpload() {
       const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
       // 입지토양 미완료 — 전송 직전 최신 레코드로 다시 확인(다른 탭이 그 사이 이미 완료시켰을 수 있음)
+      if (!shouldContinueUpload()) { interrupted = true; break; }
       {
         const freshSoilRec = freshRecord(rec.id);
         if (freshSoilRec && !freshSoilRec.soilUploaded && freshSoilRec.soilRow) {
@@ -2646,6 +2661,7 @@ async function autoRetryUpload() {
         }
       }
       // 임목조사 미완료 — 동일 패턴
+      if (!shouldContinueUpload()) { interrupted = true; break; }
       {
         const freshTreeRec = freshRecord(rec.id);
         if (freshTreeRec && !freshTreeRec.treeUploaded && freshTreeRec.treeRows && freshTreeRec.treeRows.length > 0) {
@@ -2675,6 +2691,7 @@ async function autoRetryUpload() {
         const totalPhotos = rec.photoList.filter(p => !p.uploaded).length;
         let donePhotos = 0;
         for (const p of rec.photoList) {
+          if (!shouldContinueUpload()) { interrupted = true; break; }
           if (p.uploaded) continue;
 
           // IDB에서 사진 데이터 찾기 — origKey(조사지번호 포함) 우선, 없으면 photo_N fallback
@@ -2724,18 +2741,23 @@ async function autoRetryUpload() {
       }
 
       // soil/tree/사진 각각 성공 시점에 patchRecord + refreshSynced로 이미 즉시 반영됨(위 참고) — 별도 완료 상태 업데이트 불필요
-      if (recordFailed || recordPhotoFailed > 0) { failedCount++; } else { successCount++; }
+      // 인터럽트로 중단된 레코드는 "성공/실패 집계"에 포함하지 않는다 — 아직 끝나지 않았을 뿐이므로
+      if (!interrupted) {
+        if (recordFailed || recordPhotoFailed > 0) { failedCount++; } else { successCount++; }
+      }
     } catch (err) {
       failedCount++;
       console.warn('autoRetry 실패:', rec.plotNo, err);
     }
   }
 
-  if (successCount > 0 && failedCount === 0 && failedPhotoCount === 0) {
+  if (successCount > 0 && failedCount === 0 && failedPhotoCount === 0 && !interrupted) {
     showToast('✅ 자동 업로드 ' + successCount + '건 완료!', 'success');
     // 모든 사진 성공 시 IDB 원본 클리어
     for (let i = 0; i < 12; i++) idbDelete('photo_' + i).catch(() => {});
     for (let i = 0; i < 4; i++) idbDelete('move_photo_' + i).catch(() => {});
+  } else if (interrupted && failedCount === 0 && failedPhotoCount === 0) {
+    showToast('⏸️ 앱이 백그라운드로 전환돼 업로드를 중단했습니다(' + successCount + '건 완료) — 다시 시도해주세요', 'info');
   } else if (successCount > 0 && (failedCount > 0 || failedPhotoCount > 0)) {
     showToast('⚠️ 자동 업로드 일부 완료 — 성공 ' + successCount + '건, 실패 ' + (failedCount + failedPhotoCount) + '건 (저장목록에서 해당 조사지 불러온 후 다시 시도해주세요)', 'error');
   } else if (successCount === 0 && (failedCount > 0 || failedPhotoCount > 0)) {
@@ -5337,9 +5359,11 @@ async function reuploadRecord(id) {
   const weekCode = (rec.soilRow && rec.soilRow[34]) || (window._plotMap && window._plotMap[plotNo]?.week) || '주차미정';
   const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
+  let interrupted = false;
   try {
     // 입지토양 미완료 시 재업로드 — 전송 직전 최신 레코드로 다시 확인(다른 탭이 그 사이 이미 완료시켰을 수 있음)
-    {
+    if (!shouldContinueUpload()) { interrupted = true; }
+    if (!interrupted) {
       const freshSoilRec = freshRecord(id);
       if (freshSoilRec && !freshSoilRec.soilUploaded && freshSoilRec.soilRow) {
         const soilPayload = buildSoilPayload(freshSoilRec);
@@ -5354,7 +5378,8 @@ async function reuploadRecord(id) {
       }
     }
     // 임목조사 미완료 시 재업로드 — 동일 패턴
-    {
+    if (!shouldContinueUpload()) { interrupted = true; }
+    if (!interrupted) {
       const freshTreeRec = freshRecord(id);
       if (freshTreeRec && !freshTreeRec.treeUploaded && freshTreeRec.treeRows && freshTreeRec.treeRows.length > 0) {
         const treePayload = buildTreePayload(freshTreeRec);
@@ -5369,11 +5394,13 @@ async function reuploadRecord(id) {
       }
     }
     // 사진 미완료 시 재업로드
-    if (rec.photoList && rec.photoList.length > 0) {
+    if (!shouldContinueUpload()) { interrupted = true; }
+    if (!interrupted && rec.photoList && rec.photoList.length > 0) {
       const totalPhotos = rec.photoList.filter(p => !p.uploaded).length;
       let donePhotos = 0;
       let failedPhotos = 0;
       for (const p of rec.photoList) {
+        if (!shouldContinueUpload()) { interrupted = true; break; }
         if (p.uploaded) continue;
         const isMove = p.filename.includes('기존현황');
         const slotIdx = isMove
@@ -5445,12 +5472,18 @@ async function reuploadRecord(id) {
       }
     }
     // soil/tree/사진 각각 성공 시점에 patchRecord로 이미 즉시 반영됨 — 오래된 rec 통째 재저장 없음
-    showToast('✅ ' + rec.plotNo + ' 재업로드 완료!', 'success');
-    // 모든 사진 성공 시 IDB 원본 클리어 (다음 조사지 빈 슬롯 정확히 인식)
-    for (let i = 0; i < 12; i++) idbDelete('photo_' + i).catch(() => {});
-    for (let i = 0; i < 4; i++) idbDelete('move_photo_' + i).catch(() => {});
+    // 인터럽트로 중단됐으면 "완료"를 통보하거나 캐시를 정리하지 않는다 — 아직 안 끝났을 뿐이므로
+    if (interrupted) {
+      showToast('⏸️ 앱이 백그라운드로 전환돼 재업로드를 중단했습니다 — 다시 시도해주세요', 'info');
+    } else {
+      showToast('✅ ' + rec.plotNo + ' 재업로드 완료!', 'success');
+      // 모든 사진 성공 시 IDB 원본 클리어 (다음 조사지 빈 슬롯 정확히 인식)
+      for (let i = 0; i < 12; i++) idbDelete('photo_' + i).catch(() => {});
+      for (let i = 0; i < 4; i++) idbDelete('move_photo_' + i).catch(() => {});
+    }
     _isUploading = false;
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '저장'; }
+    if (btn) { btn.disabled = false; btn.textContent = '📤 재업로드'; }
     renderRecordsList();
   } catch(e) {
     showToast('❌ 재업로드 실패 — 다시 시도해주세요', 'error');
