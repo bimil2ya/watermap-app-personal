@@ -2747,7 +2747,7 @@ async function autoRetryUpload() {
   const records = JSON.parse(localStorage.getItem('survey_records') || '[]');
   const incomplete = records.filter(r => {
     const photosDone = !r.photoList || r.photoList.length === 0 || r.photoList.every(p => p.uploaded);
-    return !r.soilUploaded || !r.treeUploaded || !photosDone;
+    return !r.soilUploaded || !isTreeComplete(r) || !photosDone;
   });
   if (incomplete.length === 0) return;
 
@@ -5321,7 +5321,7 @@ function renderRecordsList() {
   // 미전송 건수 계산 + 일괄 전송 버튼 갱신
   const pendingCount = records.filter(r => {
     const photosDone = !r.photoList || r.photoList.length === 0 || r.photoList.every(p => p.uploaded);
-    return !r.soilUploaded || !r.treeUploaded || !photosDone;
+    return !r.soilUploaded || !isTreeComplete(r) || !photosDone;
   }).length;
   const sendAllBar = document.getElementById('send-all-bar');
   const sendAllBtn = document.getElementById('send-all-btn');
