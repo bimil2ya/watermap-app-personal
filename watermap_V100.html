@@ -2595,6 +2595,137 @@ function ensureUploadErrors(rec) {
   return rec.uploadErrors;
 }
 
+// 사진 한 장의 성공을 확정하는 유일한 지점 — attemptedCaptureId가 현재 상태와 일치할 때만
+// (이미 최신 캡처로 넘어갔거나 이미 완료된 게 아닐 때만) uploaded/forceUpload/cooldownUntil/
+// unconfirmedAttempt를 갱신하고 원본을 정리한다. 실제로 확정했는지 여부를 boolean으로 반환한다.
+function finalizePhotoSuccess(recordId, plotNo, filename, attemptedCaptureId) {
+  const slot = resolvePhotoSlot(plotNo, filename);
+  if (!slot) return false; // 슬롯 식별 자체가 안 되면 patchRecord를 시도조차 하지 않는다
+  let finalized = false;
+  const updatedRec = patchRecord(recordId, rec => {
+    const item = (rec.photoList || []).find(p => p.filename === filename);
+    if (!item || item.captureId !== attemptedCaptureId || item.uploaded) return; // 늦게 도착한 예전 캡처의 응답이거나 이미 확정된 경우
+    finalized = true;
+    item.uploaded = true;
+    item.forceUpload = false;
+    item.cooldownUntil = null;
+    item.unconfirmedAttempt = false;
+    delete ensureUploadErrors(rec).photos[filename];
+    refreshSynced(rec);
+  });
+  if (!finalized || !updatedRec) return false;
+  // 삭제 실패는 성공 확정을 되돌릴 이유가 없으므로 비차단 — 원본도 같은 captureId일 때만 지운다
+  idbGet(slot.slotOrigKey).then(stored => {
+    if (stored && stored.captureId === attemptedCaptureId) return idbDelete(slot.slotOrigKey);
+  }).catch(err => console.warn('원본 정리 실패', err));
+  return true;
+}
+
+// 사진 오류를 기록하는 모든 지점이 공용으로 쓰는 헬퍼 — captureId 가드(늦게 도착한 예전 시도 무시) +
+// 메시지 250자 제한을 항상 강제한다. 실제로 기록했는지 여부를 반환 — 호출부가 이 값으로 실패 집계 여부를 결정한다.
+function recordPhotoError(recordId, filename, attemptedCaptureId, detail) {
+  let recorded = false;
+  patchRecord(recordId, r => {
+    const item = (r.photoList || []).find(p => p.filename === filename);
+    if (!item || item.captureId !== attemptedCaptureId) return; // 늦게 도착한 예전 시도의 오류
+    recorded = true;
+    ensureUploadErrors(r).photos[filename] = { ...detail, message: String(detail.message || '업로드 실패').slice(0, 250), atMs: Date.now(), at: new Date().toLocaleString('ko-KR'), captureId: attemptedCaptureId };
+  });
+  return recorded;
+}
+
+// 전송 직전 최신 사진 항목을 다시 읽는다 — freshRecord의 사진 버전.
+function getCurrentPhotoItem(recordId, filename) {
+  return (freshRecord(recordId)?.photoList || []).find(p => p.filename === filename) || null;
+}
+
+// 사진 1장 업로드 + 실패 시 재확인(재촬영본은 제외) — 자동 재전송은 하지 않는다.
+// payload: {base64, filename, plotNo, teamCode, weekCode, folderId} — recordId는 서버로 전송하지 않고
+// 로컬 상태 갱신에만 쓰인다. photoItem은 이 시도가 시작될 때(호출 직전) 읽어둔 photoList 항목 스냅샷.
+async function uploadPhotoWithRecovery(scriptUrl, payload, recordId, photoItem) {
+  let current = getCurrentPhotoItem(recordId, payload.filename);
+  if (!current || current.captureId !== photoItem.captureId || current.uploaded) {
+    return { success: false, stale: true };
+  }
+
+  if (current.cooldownUntil && Date.now() < current.cooldownUntil) {
+    return { success: false, cooldown: true, retryAfterMs: current.cooldownUntil - Date.now() };
+  }
+
+  if (!current.forceUpload && current.unconfirmedAttempt) {
+    try {
+      const checkResult = await sendToScript(scriptUrl, {
+        type: 'photoCheck', filename: payload.filename, folderId: payload.folderId,
+        plotNo: payload.plotNo, teamCode: payload.teamCode, weekCode: payload.weekCode
+      });
+      if (checkResult && checkResult.exists) {
+        return { success: true, recovered: true };
+      }
+      // exists:false — 서버 처리 여부가 이제 확인됐으므로 아래 실제 POST로 진행
+    } catch (e) {
+      return { success: false, errorMessage: '확인 실패 — 잠시 후 재시도', checkFailed: true };
+    }
+  }
+
+  // 실제 POST 전에 patchRecord 콜백 안에서 원자적으로 확인 후 cooldown/unconfirmedAttempt를 선제 기록한다.
+  let armed = false;
+  let blockedUntil = null;
+  patchRecord(recordId, r => {
+    const item = (r.photoList || []).find(x => x.filename === payload.filename);
+    if (!item || item.captureId !== photoItem.captureId || item.uploaded) return;
+    if (item.cooldownUntil && Date.now() < item.cooldownUntil) {
+      blockedUntil = item.cooldownUntil;
+      return;
+    }
+    item.cooldownUntil = Date.now() + 120000;
+    item.unconfirmedAttempt = true;
+    armed = true;
+  });
+  if (!armed) {
+    return blockedUntil
+      ? { success: false, cooldown: true, retryAfterMs: blockedUntil - Date.now() }
+      : { success: false, stale: true };
+  }
+
+  try {
+    await sendToScript(scriptUrl, { type: 'photo', ...payload });
+    return { success: true };
+  } catch (err) {
+    if (err instanceof ServerRejectedError) {
+      // 서버가 처리를 끝냈다는 뜻이므로(파일이 이미 생겼을 수 있음) 대기를 즉시 해제 — 재촬영본이든 아니든 공통
+      patchRecord(recordId, r => {
+        const item = (r.photoList || []).find(p => p.filename === payload.filename);
+        if (item && item.captureId === photoItem.captureId) {
+          item.cooldownUntil = null;
+          item.unconfirmedAttempt = false;
+        }
+      });
+    }
+    // 그 외 실패(timeout/네트워크/HTTP오류/파싱실패)는 cooldown/unconfirmedAttempt를 그대로 유지 — 서버 처리 여부가 불확실하므로
+
+    current = getCurrentPhotoItem(recordId, payload.filename);
+    if (!current) return { success: false, errorMessage: String(err.message || err), checkFailed: false };
+
+    if (current.forceUpload) {
+      // 재촬영본은 exists:true가 예전 파일일 수도 있어 확인 자체를 신뢰할 수 없음 — 확인하지 않고 실패로 남김
+      return { success: false, errorMessage: String(err.message || err), checkFailed: false };
+    }
+
+    try {
+      const checkResult = await sendToScript(scriptUrl, {
+        type: 'photoCheck', filename: payload.filename, folderId: payload.folderId,
+        plotNo: payload.plotNo, teamCode: payload.teamCode, weekCode: payload.weekCode
+      });
+      if (checkResult && checkResult.exists) {
+        return { success: true, recovered: true };
+      }
+      return { success: false, errorMessage: String(err.message || err), checkFailed: false };
+    } catch (checkErr) {
+      return { success: false, errorMessage: String(err.message || err), checkFailed: true };
+    }
+  }
+}
+
 // 앱이 백그라운드로 전환되면(카메라 전환, 화면 잠금, 다른 앱 전환 등) 그 이후로는 계속 visible 상태가 아니었더라도
 // 다시 돌아왔을 때 자동으로 이어서 전송하지 않는다 — 한 번이라도 hidden이 됐었는지를 기억하는 sticky 플래그.
 // "미전송 전송"/"재업로드"를 사용자가 다시 누를 때만 false로 되돌린다.
@@ -2699,11 +2830,7 @@ async function autoRetryUpload() {
         }
       }
 
-      // 사진 미완료 — 안 올라간 것만, 1장씩 개별 처리
-      const NORMAL_SLOTS = ['C_울폐도','N_8M','N_4M_울폐도','E_8M','E_4M_울폐도',
-                            'S_8M','S_4M_울폐도','W_8M','W_4M_울폐도','전토심','토양단면','지표면'];
-      const MOVE_SLOTS   = ['N_기존현황','E_기존현황','S_기존현황','W_기존현황'];
-
+      // 사진 미완료 — 안 올라간 것만, 1장씩 개별 처리 (재확인 기반 복구, 자동 재전송 없음)
       if (rec.photoList && rec.photoList.length > 0) {
         const totalPhotos = rec.photoList.filter(p => !p.uploaded).length;
         let donePhotos = 0;
@@ -2711,48 +2838,47 @@ async function autoRetryUpload() {
           if (!shouldContinueUpload()) { interrupted = true; break; }
           if (p.uploaded) continue;
 
-          // IDB에서 사진 데이터 찾기 — origKey(조사지번호 포함) 우선, 없으면 photo_N fallback
+          const slot = resolvePhotoSlot(plotNo, p.filename);
+          if (!slot) {
+            const recorded = recordPhotoError(rec.id, p.filename, p.captureId, { message: '사진 슬롯을 식별할 수 없습니다', checkFailed: false });
+            if (recorded) { failedPhotoCount++; recordPhotoFailed++; }
+            continue;
+          }
+
+          // IDB에서 사진 데이터 찾기 — 원본 우선, 없으면 보조 캐시(captureId 일치할 때만 신뢰)
           let base64 = null;
-          let usedOrigKey = null;
-          const normalIdx = NORMAL_SLOTS.findIndex(s => p.filename.includes('(' + s + ')'));
-          if (normalIdx !== -1) {
-            let stored = await idbGet(idbOrigKey(plotNo, normalIdx));
-            if (stored && stored.base64) { base64 = stored.base64; usedOrigKey = idbOrigKey(plotNo, normalIdx); }
-            if (!base64) {
-              stored = await idbGet('photo_' + normalIdx);
-              if (stored && stored.base64) base64 = stored.base64;
+          const stored = await idbGet(slot.slotOrigKey);
+          if (stored && stored.base64) {
+            if (p.captureId && stored.captureId !== p.captureId) {
+              const recorded = recordPhotoError(rec.id, p.filename, p.captureId, { message: '원본이 변경되었습니다 — 먼저 저장한 뒤 다시 시도해주세요', checkFailed: false });
+              if (recorded) { failedPhotoCount++; recordPhotoFailed++; }
+              continue;
+            }
+            base64 = stored.base64;
+          } else {
+            const cached = await idbGet(slot.cacheKey);
+            if (cached && cached.base64 && p.captureId && cached.captureId === p.captureId) {
+              base64 = cached.base64;
             }
           }
           if (!base64) {
-            const moveIdx = MOVE_SLOTS.findIndex(s => p.filename.includes('(' + s + ')'));
-            if (moveIdx !== -1) {
-              let stored = await idbGet(idbMoveOrigKey(plotNo, moveIdx));
-              if (stored && stored.base64) { base64 = stored.base64; usedOrigKey = idbMoveOrigKey(plotNo, moveIdx); }
-              if (!base64) {
-                stored = await idbGet('move_photo_' + moveIdx);
-                if (stored && stored.base64) base64 = stored.base64;
-              }
-            }
+            const recorded = recordPhotoError(rec.id, p.filename, p.captureId, { message: '원본 사진을 기기에서 찾을 수 없습니다 — 다시 촬영해주세요', checkFailed: false });
+            if (recorded) { failedPhotoCount++; recordPhotoFailed++; }
+            continue;
           }
-          if (!base64) { console.warn('autoRetry: IDB에 원본 사진 없음 —', p.filename); failedPhotoCount++; recordPhotoFailed++; continue; }
 
           donePhotos++;
           showToast(`📷 ${plotNo} 사진 업로드 중... ${donePhotos}/${totalPhotos}`, 'info');
-          try {
-            await sendToScript(scriptUrl, { type: 'photo', base64, filename: p.filename, plotNo, teamCode, weekCode, folderId });
-            // 1장 성공 시 즉시 uploaded:true 저장 + origKey 클리어
-            if (usedOrigKey) idbDelete(usedOrigKey).catch(() => {});
-            const recsP = JSON.parse(localStorage.getItem('survey_records') || '[]');
-            const pIdx = recsP.findIndex(r => r.plotNo === plotNo);
-            if (pIdx !== -1 && recsP[pIdx].photoList) {
-              recsP[pIdx].photoList = recsP[pIdx].photoList.map(ph =>
-                ph.filename === p.filename ? { ...ph, uploaded: true } : ph
-              );
-              localStorage.setItem('survey_records', JSON.stringify(recsP));
-            }
-          } catch(photoErr) {
-            failedPhotoCount++;
-            recordPhotoFailed++;
+          const attemptedCaptureId = p.captureId;
+          const result = await uploadPhotoWithRecovery(scriptUrl, { base64, filename: p.filename, plotNo, teamCode, weekCode, folderId }, rec.id, p);
+          if (result.success) {
+            finalizePhotoSuccess(rec.id, plotNo, p.filename, attemptedCaptureId);
+            // confirmed가 false여도(다른 탭이 이미 최신 캡처로 넘어감) 성공/실패 어느 쪽으로도 집계하지 않는다
+          } else if (result.cooldown || result.stale) {
+            // 대기 중이거나 이미 낡은 시도 — 실패로 집계하지 않음
+          } else {
+            const recorded = recordPhotoError(rec.id, p.filename, attemptedCaptureId, { message: result.errorMessage, checkFailed: result.checkFailed });
+            if (recorded) { failedPhotoCount++; recordPhotoFailed++; }
           }
         }
       }
@@ -5492,36 +5618,46 @@ async function reuploadRecord(id) {
           }
         } catch(e) { /* 확인 실패 시 업로드 시도 */ }
 
+        const slot = resolvePhotoSlot(plotNo, p.filename);
+        if (!slot) {
+          const recorded = recordPhotoError(id, p.filename, p.captureId, { message: '사진 슬롯을 식별할 수 없습니다', checkFailed: false });
+          if (recorded) failedPhotos++;
+          continue;
+        }
+
+        // IDB에서 사진 데이터 찾기 — 원본 우선, 없으면 보조 캐시(captureId 일치할 때만 신뢰)
         let base64 = null;
-        let usedOrigKey = null;
-        if (slotIdx >= 0) {
-          // origKey(조사지번호 포함) 우선 — 다른 조사지 사진 섞임 방지
-          const origKey = isMove ? idbMoveOrigKey(plotNo, slotIdx) : idbOrigKey(plotNo, slotIdx);
-          let stored = await idbGet(origKey);
-          if (stored && stored.base64) { base64 = stored.base64; usedOrigKey = origKey; }
-          // origKey 없으면 photo_N fallback
-          if (!base64) {
-            const photoKey = isMove ? 'move_photo_' + slotIdx : 'photo_' + slotIdx;
-            stored = await idbGet(photoKey);
-            if (stored && stored.base64) base64 = stored.base64;
+        const stored = await idbGet(slot.slotOrigKey);
+        if (stored && stored.base64) {
+          if (p.captureId && stored.captureId !== p.captureId) {
+            const recorded = recordPhotoError(id, p.filename, p.captureId, { message: '원본이 변경되었습니다 — 먼저 저장한 뒤 다시 시도해주세요', checkFailed: false });
+            if (recorded) failedPhotos++;
+            continue;
+          }
+          base64 = stored.base64;
+        } else {
+          const cached = await idbGet(slot.cacheKey);
+          if (cached && cached.base64 && p.captureId && cached.captureId === p.captureId) {
+            base64 = cached.base64;
           }
         }
-        if (!base64) { console.warn('재업로드: 원본 사진 없음 —', p.filename); failedPhotos++; continue; }
+        if (!base64) {
+          const recorded = recordPhotoError(id, p.filename, p.captureId, { message: '원본 사진을 기기에서 찾을 수 없습니다 — 다시 촬영해주세요', checkFailed: false });
+          if (recorded) failedPhotos++;
+          continue;
+        }
+
         donePhotos++;
         showToast(`📷 ${plotNo} 사진 재업로드 중... ${donePhotos}/${totalPhotos}`, 'info');
-        try {
-          await sendToScript(scriptUrl, { type: 'photo', base64, filename: p.filename, plotNo, teamCode, weekCode, folderId });
-          p.uploaded = true;
-          // 1장 성공 시 origKey 클리어 + 오래된 rec 통째 재저장 대신 patchRecord로 이 항목만 즉시 갱신
-          if (usedOrigKey) idbDelete(usedOrigKey).catch(() => {});
-          patchRecord(id, r => {
-            const item = (r.photoList || []).find(x => x.filename === p.filename);
-            if (item) item.uploaded = true;
-            refreshSynced(r);
-          });
-        } catch(photoErr) {
-          failedPhotos++;
-          console.warn('사진 업로드 실패:', p.filename, photoErr);
+        const attemptedCaptureId = p.captureId;
+        const result = await uploadPhotoWithRecovery(scriptUrl, { base64, filename: p.filename, plotNo, teamCode, weekCode, folderId }, id, p);
+        if (result.success) {
+          finalizePhotoSuccess(id, plotNo, p.filename, attemptedCaptureId);
+        } else if (result.cooldown || result.stale) {
+          // 대기 중이거나 이미 낡은 시도 — 실패로 집계하지 않음
+        } else {
+          const recorded = recordPhotoError(id, p.filename, attemptedCaptureId, { message: result.errorMessage, checkFailed: result.checkFailed });
+          if (recorded) failedPhotos++;
         }
       }
       if (failedPhotos > 0) {
