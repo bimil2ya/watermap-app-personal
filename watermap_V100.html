@@ -1581,6 +1581,7 @@ const MASTER_DRIVE_FOLDER = '1p4YEtBtK0MqNYNzHFUTCw24I4pMH_FmA';
 let currentTab = 'tab-soil';
 let treeRowCount = 0;
 let photoData = {};
+let deletedPhotoFilenames = new Set(); // 현재 편집 세션에서 UI로 명시적으로 삭제한 사진 filename — photoList 병합 시 되살리기 방지용
 let _isUploading = false; // 업로드 중 중복 방지 플래그
 
 // ====== IndexedDB ======
@@ -1648,6 +1649,16 @@ function idbViewKey(plotNo, idx)     { return 'view_' + plotNo + '_' + idx; }
 function idbMoveViewKey(plotNo, idx) { return 'view_move_' + plotNo + '_' + idx; }
 function idbOrigKey(plotNo, idx)     { return 'orig_' + plotNo + '_' + idx; }
 function idbMoveOrigKey(plotNo, idx) { return 'orig_move_' + plotNo + '_' + idx; }
+
+// 파일명으로 일반/이동사진 슬롯을 판별하는 공용 함수 (PHOTO_SLOTS/MOVE_PHOTO_SLOTS는 아래에서 정의되지만,
+// 이 함수는 스크립트 로드가 끝난 뒤 실제 호출 시점에만 참조하므로 선언 순서와 무관하게 동작한다)
+function resolvePhotoSlot(plotNo, filename) {
+  let idx = PHOTO_SLOTS.findIndex(s => filename === plotNo + '(' + s + ').jpg');
+  if (idx !== -1) return { isMove: false, slotIdx: idx, slotOrigKey: idbOrigKey(plotNo, idx), cacheKey: 'photo_' + idx };
+  idx = MOVE_PHOTO_SLOTS.findIndex(s => filename === plotNo + '(' + s + ').jpg');
+  if (idx !== -1) return { isMove: true, slotIdx: idx, slotOrigKey: idbMoveOrigKey(plotNo, idx), cacheKey: 'move_photo_' + idx };
+  return null; // 슬롯을 식별할 수 없음(파일명 손상 등)
+}
 
 // 슬롯용 썸네일 (150×113 quality 0.15) — 격자 슬롯 표시용, 가볍고 빠름
 function makeMicroThumb(base64, isPortrait) {
@@ -1771,10 +1782,23 @@ async function restoreDraft(plotNo) {
       plotDisplay.style.fontWeight = draft._plotDisplayWeight || '';
     }
 
-    // 사진 썸네일 복원 (IndexedDB에서)
+    // 사진 썸네일 복원 (IndexedDB에서) — 원본(idbOrigKey) 우선, 없으면 captureId 일치할 때만 보조 캐시로 폴백
+    if (draft._photoKeys || draft._movePhotoKeys) {
+      const _records = JSON.parse(localStorage.getItem('survey_records') || '[]');
+      const _existingRec2 = _records.find(r => r.plotNo === plotNo);
+      var _existingPhotoMap = {};
+      (_existingRec2?.photoList || []).forEach(p => { _existingPhotoMap[p.filename] = p; });
+    }
     if (draft._photoKeys) {
       for (const { k, filename } of draft._photoKeys) {
-        const stored = await idbGet('photo_' + k);
+        let stored = await idbGet(idbOrigKey(plotNo, k)); // 원본 우선
+        if (!stored) {
+          const cached = await idbGet('photo_' + k); // 없으면 보조 캐시 폴백
+          const prev = _existingPhotoMap[filename];
+          if (cached && prev && cached.captureId && cached.captureId === prev.captureId) {
+            stored = cached; // captureId 일치할 때만 신뢰
+          }
+        }
         if (stored) {
           photoData[k] = { filename };
           const slot = document.getElementById('photo-slot-' + k);
@@ -1791,10 +1815,17 @@ async function restoreDraft(plotNo) {
         }
       }
     }
-    // 이동사진 썸네일 복원
+    // 이동사진 썸네일 복원 — 동일 원칙(원본 우선 + captureId 검증)
     if (draft._movePhotoKeys) {
       for (const { k, filename } of draft._movePhotoKeys) {
-        const stored = await idbGet('move_photo_' + k);
+        let stored = await idbGet(idbMoveOrigKey(plotNo, k)); // 원본 우선
+        if (!stored) {
+          const cached = await idbGet('move_photo_' + k); // 없으면 보조 캐시 폴백
+          const prev = _existingPhotoMap[filename];
+          if (cached && prev && cached.captureId && cached.captureId === prev.captureId) {
+            stored = cached; // captureId 일치할 때만 신뢰
+          }
+        }
         if (stored) {
           movePhotoData[k] = { filename };
           const slot = document.getElementById('photo-move-slot-' + k);
@@ -1865,9 +1896,19 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
 
     // onlyNew=true(수정 재업로드): 새로 찍은 사진(원본 있는 것)만 ZIP
     // onlyNew=false(최초 업로드): 전체 원본 ZIP
+    // 원본(idbOrigKey/idbMoveOrigKey) 우선, 없으면 captureId 일치할 때만 보조 캐시로 폴백
+    const _zipRecords = JSON.parse(localStorage.getItem('survey_records') || '[]');
+    const _zipExistingRec = _zipRecords.find(r => r.plotNo === plotNo);
+    const _zipExistingPhotoMap = {};
+    (_zipExistingRec?.photoList || []).forEach(p => { _zipExistingPhotoMap[p.filename] = p; });
     // 일반 사진 (12장)
     for (const [idx, p] of Object.entries(photoData)) {
-      const stored = await idbGet('photo_' + idx);
+      let stored = await idbGet(idbOrigKey(plotNo, idx));
+      if (!stored) {
+        const cached = await idbGet('photo_' + idx);
+        const prev = _zipExistingPhotoMap[p.filename];
+        if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+      }
       if (stored && stored.base64) {
         zip.file(p.filename, stored.base64, { base64: true });
         count++;
@@ -1875,7 +1916,12 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
     }
     // 이동사진 (최대 4장)
     for (const [idx, p] of Object.entries(movePhotoData)) {
-      const stored = await idbGet('move_photo_' + idx);
+      let stored = await idbGet(idbMoveOrigKey(plotNo, idx));
+      if (!stored) {
+        const cached = await idbGet('move_photo_' + idx);
+        const prev = _zipExistingPhotoMap[p.filename];
+        if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+      }
       if (stored && stored.base64) {
         zip.file(p.filename, stored.base64, { base64: true });
         count++;
@@ -2923,16 +2969,33 @@ async function saveData() {
     existingRec2.photoList.length > 0 &&
     existingRec2.photoList.some(p => p.uploaded);
 
-  // 새로 촬영한 사진이 있는지 확인 (IDB에 원본이 남아있으면 새로 찍은 것 — ZIP 백업 여부 판단용)
+  // 새로 촬영한 사진이 있는지 확인 (원본 우선, 없으면 captureId 일치할 때만 보조 캐시로 폴백 — ZIP 백업 여부 판단용)
   let hasNewPhotos = false;
-  for (const idx of Object.keys(photoData)) {
-    const stored = await idbGet('photo_' + idx);
-    if (stored && stored.base64) { hasNewPhotos = true; break; }
-  }
-  if (!hasNewPhotos) {
-    for (const idx of Object.keys(movePhotoData)) {
-      const stored = await idbGet('move_photo_' + idx);
+  {
+    const recordsH = JSON.parse(localStorage.getItem('survey_records') || '[]');
+    const existingRecH = recordsH.find(r => r.plotNo === plotNo);
+    const existingPhotoMapH = {};
+    (existingRecH?.photoList || []).forEach(p => { existingPhotoMapH[p.filename] = p; });
+
+    for (const idx of Object.keys(photoData)) {
+      let stored = await idbGet(idbOrigKey(plotNo, idx));
+      if (!stored) {
+        const cached = await idbGet('photo_' + idx);
+        const prev = existingPhotoMapH[photoData[idx].filename];
+        if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+      }
       if (stored && stored.base64) { hasNewPhotos = true; break; }
+    }
+    if (!hasNewPhotos) {
+      for (const idx of Object.keys(movePhotoData)) {
+        let stored = await idbGet(idbMoveOrigKey(plotNo, idx));
+        if (!stored) {
+          const cached = await idbGet('move_photo_' + idx);
+          const prev = existingPhotoMapH[movePhotoData[idx].filename];
+          if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+        }
+        if (stored && stored.base64) { hasNewPhotos = true; break; }
+      }
     }
   }
 
@@ -3153,12 +3216,19 @@ function handleMovePhoto(event, i) {
       const base64m = compressed.split(',')[1];
       canvas.width = 0; canvas.height = 0;
 
+      // idbMoveOrigKey를 필수 원본으로 먼저 저장 — 실패하면 성공 처리(썸네일 등)를 하지 않는다
+      const captureId = globalThis.crypto?.randomUUID?.() || (Date.now() + '-' + Math.random().toString(36).slice(2));
+      try {
+        await idbSet(idbMoveOrigKey(plotNo, i), { base64: base64m, filename, captureId });
+      } catch (err) {
+        console.error(err);
+        clearTimeout(_safetyTimerM);
+        _photoProcessing = false;
+        showToast('사진 저장 실패 — 다시 촬영해주세요.', 'error');
+        return;
+      }
+      idbSet('move_photo_' + i, { base64: base64m, filename, captureId }).catch(err => console.warn('보조 캐시 저장 실패', err));
       movePhotoData[i] = { filename };
-      // IDB 저장 완료 보장 (아이폰 사파리 타이밍 이슈 방지)
-      await Promise.all([
-        idbSet('move_photo_' + i, { base64: base64m, filename }),
-        idbSet(idbMoveOrigKey(plotNo, i), { base64: base64m, filename })
-      ]).catch(console.error);
       // 슬롯 썸네일 + 뷰어용 이미지 동시 저장
       const _plotNoForMoveThumb = plotNo;
       Promise.all([
@@ -3747,14 +3817,24 @@ function triggerMovePhotoGallery(idx) {
 }
 
 // 이동사진 삭제
-function deleteMovePhotoSlot(i) {
+async function deleteMovePhotoSlot(i) {
   const _delMovePlotNo = document.getElementById('soil-plot-no')?.value || '';
-  delete movePhotoData[i];
-  idbDelete('move_photo_' + i).catch(console.error);
-  if (_delMovePlotNo) {
-    idbDelete(idbMoveThumbKey(_delMovePlotNo, i)).catch(console.error);
-    idbDelete(idbMoveViewKey(_delMovePlotNo, i)).catch(console.error);
+  const _delMoveFilename = _delMovePlotNo + '(' + MOVE_PHOTO_SLOTS[i] + ').jpg';
+  const _delMoveRecords = JSON.parse(localStorage.getItem('survey_records') || '[]');
+  const _delMoveExistingRec = _delMoveRecords.find(r => r.plotNo === _delMovePlotNo);
+  const _delMoveItem = _delMoveExistingRec?.photoList?.find(p => p.filename === _delMoveFilename);
+  if (_delMoveItem?.uploaded) {
+    if (!confirm('이미 업로드된 사진입니다.\n\n' + MOVE_PHOTO_SLOTS_LABEL[i] + '\n\n※ 기기 목록에서만 제거됩니다. 관리자 취합 데이터와 Drive의 기존 파일은 삭제되지 않습니다.\n※ 수정이 목적이라면 삭제 대신 같은 슬롯을 다시 촬영해 전송하는 것을 권장합니다.\n\n삭제하시겠습니까?')) return;
   }
+  delete movePhotoData[i];
+  if (_delMovePlotNo) deletedPhotoFilenames.add(_delMoveFilename);
+  const _delMoveOps = [idbDelete('move_photo_' + i)];
+  if (_delMovePlotNo) {
+    _delMoveOps.push(idbDelete(idbMoveOrigKey(_delMovePlotNo, i)));
+    _delMoveOps.push(idbDelete(idbMoveThumbKey(_delMovePlotNo, i)));
+    _delMoveOps.push(idbDelete(idbMoveViewKey(_delMovePlotNo, i)));
+  }
+  await Promise.allSettled(_delMoveOps);
   const slot = document.getElementById('photo-move-slot-' + i);
   if (slot) {
     slot.className = 'photo-slot landscape-slot';
@@ -3847,12 +3927,19 @@ function handlePhoto(event, idx) {
       // canvas 메모리 즉시 해제
       canvas.width = 0; canvas.height = 0;
 
+      // 원본(0.75): idbOrigKey를 필수 원본으로 먼저 저장 — 실패하면 성공 처리(썸네일/토스트)를 하지 않는다
+      const captureId = globalThis.crypto?.randomUUID?.() || (Date.now() + '-' + Math.random().toString(36).slice(2));
+      try {
+        await idbSet(idbOrigKey(plotNo, idx), { base64, filename, captureId });
+      } catch (err) {
+        console.error(err);
+        clearTimeout(_safetyTimer);
+        _photoProcessing = false;
+        showToast('사진 저장 실패 — 다시 촬영해주세요.', 'error');
+        return;
+      }
+      idbSet('photo_' + idx, { base64, filename, captureId }).catch(err => console.warn('보조 캐시 저장 실패', err));
       photoData[idx] = { filename };
-      // 원본(0.75): IDB 저장 완료 보장 (아이폰 사파리 타이밍 이슈 방지)
-      await Promise.all([
-        idbSet('photo_' + idx, { base64, filename }),
-        idbSet(idbOrigKey(plotNo, idx), { base64, filename })
-      ]).catch(console.error);
       saveDraft(); // 사진 저장 직후 즉시 draft 저장
 
       // 썸네일: 조사지번호 포함 키로 영구 저장 (복원용)
@@ -3904,14 +3991,24 @@ function handlePhoto(event, idx) {
   tmpImg.src = blobUrl;
 }
 
-function deletePhoto(idx) {
+async function deletePhoto(idx) {
   const _delPlotNo = document.getElementById('soil-plot-no')?.value || '';
-  delete photoData[idx];
-  idbDelete('photo_' + idx).catch(console.error);
-  if (_delPlotNo) {
-    idbDelete(idbThumbKey(_delPlotNo, idx)).catch(console.error);
-    idbDelete(idbViewKey(_delPlotNo, idx)).catch(console.error);
+  const filename = _delPlotNo + '(' + PHOTO_SLOTS[idx] + ').jpg';
+  const _delRecords = JSON.parse(localStorage.getItem('survey_records') || '[]');
+  const _delExistingRec = _delRecords.find(r => r.plotNo === _delPlotNo);
+  const _delItem = _delExistingRec?.photoList?.find(p => p.filename === filename);
+  if (_delItem?.uploaded) {
+    if (!confirm('이미 업로드된 사진입니다.\n\n' + PHOTO_SLOTS[idx] + '\n\n※ 기기 목록에서만 제거됩니다. 관리자 취합 데이터와 Drive의 기존 파일은 삭제되지 않습니다.\n※ 수정이 목적이라면 삭제 대신 같은 슬롯을 다시 촬영해 전송하는 것을 권장합니다.\n\n삭제하시겠습니까?')) return;
   }
+  delete photoData[idx];
+  if (_delPlotNo) deletedPhotoFilenames.add(filename);
+  const _delOps = [idbDelete('photo_' + idx)];
+  if (_delPlotNo) {
+    _delOps.push(idbDelete(idbOrigKey(_delPlotNo, idx)));
+    _delOps.push(idbDelete(idbThumbKey(_delPlotNo, idx)));
+    _delOps.push(idbDelete(idbViewKey(_delPlotNo, idx)));
+  }
+  await Promise.allSettled(_delOps);
   const slot = document.getElementById('photo-slot-' + idx);
   slot.innerHTML = '';
   slot.style.cursor = 'pointer';
@@ -4553,9 +4650,17 @@ function _restoreRecordData(rec) {
     Promise.all(SLOTS.map(async (slotName, idx) => {
       const expectedFilename = pn + '(' + slotName + ').jpg';
       if (!rec.photoList.find(p => p.filename === expectedFilename)) return;
-      // 썸네일 키 우선, 없으면 원본 키 fallback
+      // 썸네일 키 우선, 없으면 원본으로 폴백(미리보기가 커지지만 표시는 문제없음), 그것도 없으면 captureId 일치할 때만 보조 캐시
       let stored = await idbGet(idbThumbKey(pn, idx));
       if (!stored || !stored.base64) stored = await idbGet(idbViewKey(pn, idx));
+      if (!stored || !stored.base64) {
+        stored = await idbGet(idbOrigKey(pn, idx));
+        if (!stored || !stored.base64) {
+          const cached = await idbGet('photo_' + idx);
+          const prev = rec.photoList.find(p => p.filename === expectedFilename);
+          if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+        }
+      }
       if (!stored || !stored.base64) return;
       photoData[idx] = { filename: expectedFilename };
       const slot = document.getElementById('photo-slot-' + idx);
@@ -4583,6 +4688,14 @@ function _restoreRecordData(rec) {
       if (!rec.photoList.find(p => p.filename === expectedFilename)) return;
       let stored = await idbGet(idbMoveThumbKey(pn, idx));
       if (!stored || !stored.base64) stored = await idbGet(idbMoveViewKey(pn, idx));
+      if (!stored || !stored.base64) {
+        stored = await idbGet(idbMoveOrigKey(pn, idx));
+        if (!stored || !stored.base64) {
+          const cached = await idbGet('move_photo_' + idx);
+          const prev = rec.photoList.find(p => p.filename === expectedFilename);
+          if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+        }
+      }
       if (!stored || !stored.base64) return;
       movePhotoData[idx] = { filename: expectedFilename };
       const slot = document.getElementById('photo-move-slot-' + idx);
@@ -4810,6 +4923,7 @@ function _doReset() {
   clearDraft();
   photoData = {};
   movePhotoData = {};
+  deletedPhotoFilenames = new Set();
   buildPhotoGrid();
   setTodayDate();
   loadDefaults();
