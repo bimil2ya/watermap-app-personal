@@ -2534,7 +2534,60 @@ function manualSendAll() {
   autoRetryUpload();
 }
 
-// ====== 앱 시작 시 미완료 업로드 자동 재시도 ======
+// ====== 전송 공용 헬퍼 ======
+// 레코드 읽기→수정→쓰기를 원자적으로(같은 탭 안에서는 그 사이 다른 코드가 끼어들 수 없게) 수행한다.
+// id 기준으로 찾는다 — plotNo보다 안정적인 키.
+function patchRecord(id, patchFn) {
+  const recs = JSON.parse(localStorage.getItem('survey_records') || '[]');
+  const idx = recs.findIndex(r => r.id === id);
+  if (idx !== -1) {
+    patchFn(recs[idx]);
+    localStorage.setItem('survey_records', JSON.stringify(recs));
+  }
+  return idx !== -1 ? recs[idx] : null;
+}
+
+// 임목 데이터가 없는 기록은 "완료"로 취급한다(수종명 최소 1행 강제가 있어 실사용에서 드물지만, 판정 기준을 한 곳으로 통일)
+function isTreeComplete(rec) {
+  const treeHas = rec.treeRows && rec.treeRows.length > 0;
+  return !treeHas || rec.treeUploaded;
+}
+
+// synced를 매 개별 확정 시점마다 최신 상태 기준으로 갱신한다(soil/tree/사진 성공 콜백에서 공용으로 호출)
+function refreshSynced(rec) {
+  const allPhotoDone = (rec.photoList || []).every(p => p.uploaded);
+  rec.synced = !!rec.soilUploaded && isTreeComplete(rec) && allPhotoDone;
+}
+
+// 전송 직전 최신 레코드를 다시 읽는다 — 루프가 들고 있던 오래된 참조 대신 이걸 써야
+// 다른 탭에서 그 사이 변경된 내용을 반영할 수 있다.
+function freshRecord(recordId) {
+  const recs = JSON.parse(localStorage.getItem('survey_records') || '[]');
+  return recs.find(r => r.id === recordId);
+}
+
+// 객체/배열을 재귀적으로 키 정렬해 직렬화 — 필드 나열 순서가 흔들려도 항상 같은 문자열을 보장한다
+function stableStringify(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+// 실제 전송한 payload 객체 그대로를 지문화한다 — 필드를 일일이 골라 나열하지 않으므로 빠지는 필드가 없다.
+function fingerprintFromPayload(payload) {
+  return stableStringify(payload);
+}
+
+function buildSoilPayload(rec) {
+  return { type: 'soil', row: rec.soilRow, overwrite: true };
+}
+function buildTreePayload(rec) {
+  return { type: 'tree', rows: rec.treeRows, overwrite: true };
+}
+
+// ====== 저장목록 탭 "미전송 N건 전송" 버튼으로 수동 실행 (자동 트리거 없음) ======
 async function autoRetryUpload() {
   if (!navigator.onLine) return;
   const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
@@ -2560,6 +2613,8 @@ async function autoRetryUpload() {
   let failedPhotoCount = 0;
 
   for (const rec of incomplete) {
+    let recordFailed = false;
+    let recordPhotoFailed = 0;
     try {
       const plotNo   = rec.plotNo;
       // teamCode: 저장된 soilRow[32] 우선, 없으면 localStorage fallback
@@ -2570,13 +2625,45 @@ async function autoRetryUpload() {
         || '주차미정';
       const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
-      // 입지토양 미완료
-      if (!rec.soilUploaded && rec.soilRow) {
-        await sendToScript(scriptUrl, { type: 'soil', row: rec.soilRow, overwrite: true });
+      // 입지토양 미완료 — 전송 직전 최신 레코드로 다시 확인(다른 탭이 그 사이 이미 완료시켰을 수 있음)
+      {
+        const freshSoilRec = freshRecord(rec.id);
+        if (freshSoilRec && !freshSoilRec.soilUploaded && freshSoilRec.soilRow) {
+          const soilPayload = buildSoilPayload(freshSoilRec);
+          const attemptedSoilFingerprint = fingerprintFromPayload(soilPayload);
+          try {
+            await sendToScript(scriptUrl, soilPayload);
+            patchRecord(rec.id, r => {
+              if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return; // 늦게 도착한 예전 시도의 응답 — 현재 상태를 건드리지 않음
+              r.soilUploaded = true;
+              r.soilFingerprint = attemptedSoilFingerprint;
+              refreshSynced(r);
+            });
+          } catch (err) {
+            recordFailed = true;
+            // 실패 기록은 2단계에서 이 catch를 채운다(자동 재전송 없음)
+          }
+        }
       }
-      // 임목조사 미완료
-      if (!rec.treeUploaded && rec.treeRows && rec.treeRows.length > 0) {
-        await sendToScript(scriptUrl, { type: 'tree', rows: rec.treeRows, overwrite: true });
+      // 임목조사 미완료 — 동일 패턴
+      {
+        const freshTreeRec = freshRecord(rec.id);
+        if (freshTreeRec && !freshTreeRec.treeUploaded && freshTreeRec.treeRows && freshTreeRec.treeRows.length > 0) {
+          const treePayload = buildTreePayload(freshTreeRec);
+          const attemptedTreeFingerprint = fingerprintFromPayload(treePayload);
+          try {
+            await sendToScript(scriptUrl, treePayload);
+            patchRecord(rec.id, r => {
+              if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
+              r.treeUploaded = true;
+              r.treeFingerprint = attemptedTreeFingerprint;
+              refreshSynced(r);
+            });
+          } catch (err) {
+            recordFailed = true;
+            // 실패 기록은 2단계에서 이 catch를 채운다(자동 재전송 없음)
+          }
+        }
       }
 
       // 사진 미완료 — 안 올라간 것만, 1장씩 개별 처리
@@ -2613,7 +2700,7 @@ async function autoRetryUpload() {
               }
             }
           }
-          if (!base64) { console.warn('autoRetry: IDB에 원본 사진 없음 —', p.filename); failedPhotoCount++; continue; }
+          if (!base64) { console.warn('autoRetry: IDB에 원본 사진 없음 —', p.filename); failedPhotoCount++; recordPhotoFailed++; continue; }
 
           donePhotos++;
           showToast(`📷 ${plotNo} 사진 업로드 중... ${donePhotos}/${totalPhotos}`, 'info');
@@ -2631,22 +2718,13 @@ async function autoRetryUpload() {
             }
           } catch(photoErr) {
             failedPhotoCount++;
+            recordPhotoFailed++;
           }
         }
       }
 
-      // 완료 상태 업데이트
-      const recs = JSON.parse(localStorage.getItem('survey_records') || '[]');
-      const idx = recs.findIndex(r => r.plotNo === plotNo);
-      if (idx !== -1) {
-        recs[idx].soilUploaded = true;
-        recs[idx].treeUploaded = recs[idx].treeUploaded || (rec.treeRows && rec.treeRows.length > 0);
-        const allPhotoDone = !recs[idx].photoList || recs[idx].photoList.length === 0
-          || recs[idx].photoList.every(p => p.uploaded);
-        recs[idx].synced = recs[idx].soilUploaded && recs[idx].treeUploaded !== false && allPhotoDone;
-        localStorage.setItem('survey_records', JSON.stringify(recs));
-      }
-      successCount++;
+      // soil/tree/사진 각각 성공 시점에 patchRecord + refreshSynced로 이미 즉시 반영됨(위 참고) — 별도 완료 상태 업데이트 불필요
+      if (recordFailed || recordPhotoFailed > 0) { failedCount++; } else { successCount++; }
     } catch (err) {
       failedCount++;
       console.warn('autoRetry 실패:', rec.plotNo, err);
@@ -5244,15 +5322,35 @@ async function reuploadRecord(id) {
   const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
   try {
-    // 입지토양 미완료 시 재업로드
-    if (!rec.soilUploaded && rec.soilRow) {
-      await sendToScript(scriptUrl, { type: 'soil', row: rec.soilRow, overwrite: true });
-      rec.soilUploaded = true;
+    // 입지토양 미완료 시 재업로드 — 전송 직전 최신 레코드로 다시 확인(다른 탭이 그 사이 이미 완료시켰을 수 있음)
+    {
+      const freshSoilRec = freshRecord(id);
+      if (freshSoilRec && !freshSoilRec.soilUploaded && freshSoilRec.soilRow) {
+        const soilPayload = buildSoilPayload(freshSoilRec);
+        const attemptedSoilFingerprint = fingerprintFromPayload(soilPayload);
+        await sendToScript(scriptUrl, soilPayload);
+        patchRecord(id, r => {
+          if (fingerprintFromPayload(buildSoilPayload(r)) !== attemptedSoilFingerprint) return; // 늦게 도착한 예전 시도의 응답 — 현재 상태를 건드리지 않음
+          r.soilUploaded = true;
+          r.soilFingerprint = attemptedSoilFingerprint;
+          refreshSynced(r);
+        });
+      }
     }
-    // 임목조사 미완료 시 재업로드
-    if (!rec.treeUploaded && rec.treeRows && rec.treeRows.length > 0) {
-      await sendToScript(scriptUrl, { type: 'tree', rows: rec.treeRows, overwrite: true });
-      rec.treeUploaded = true;
+    // 임목조사 미완료 시 재업로드 — 동일 패턴
+    {
+      const freshTreeRec = freshRecord(id);
+      if (freshTreeRec && !freshTreeRec.treeUploaded && freshTreeRec.treeRows && freshTreeRec.treeRows.length > 0) {
+        const treePayload = buildTreePayload(freshTreeRec);
+        const attemptedTreeFingerprint = fingerprintFromPayload(treePayload);
+        await sendToScript(scriptUrl, treePayload);
+        patchRecord(id, r => {
+          if (fingerprintFromPayload(buildTreePayload(r)) !== attemptedTreeFingerprint) return;
+          r.treeUploaded = true;
+          r.treeFingerprint = attemptedTreeFingerprint;
+          refreshSynced(r);
+        });
+      }
     }
     // 사진 미완료 시 재업로드
     if (rec.photoList && rec.photoList.length > 0) {
@@ -5273,11 +5371,13 @@ async function reuploadRecord(id) {
             plotNo, teamCode, weekCode
           });
           if (checkResult && checkResult.exists) {
-            // 드라이브에 이미 있으면 완료 처리 + orig 키 클리어
+            // 드라이브에 이미 있으면 완료 처리 + orig 키 클리어 — 오래된 rec 통째 재저장 대신 patchRecord로 이 항목만 갱신
             p.uploaded = true;
-            const recsP = JSON.parse(localStorage.getItem('survey_records') || '[]');
-            const pIdx = recsP.findIndex(r => r.id === id);
-            if (pIdx !== -1) { recsP[pIdx] = rec; localStorage.setItem('survey_records', JSON.stringify(recsP)); }
+            patchRecord(id, r => {
+              const item = (r.photoList || []).find(x => x.filename === p.filename);
+              if (item) item.uploaded = true;
+              refreshSynced(r);
+            });
             // 드라이브 확인 성공 → orig_plotNo_N 클리어
             if (slotIdx >= 0) {
               const origKey = isMove ? idbMoveOrigKey(plotNo, slotIdx) : idbOrigKey(plotNo, slotIdx);
@@ -5307,11 +5407,13 @@ async function reuploadRecord(id) {
         try {
           await sendToScript(scriptUrl, { type: 'photo', base64, filename: p.filename, plotNo, teamCode, weekCode, folderId });
           p.uploaded = true;
-          // 1장 성공 시 origKey 클리어 + 즉시 저장
+          // 1장 성공 시 origKey 클리어 + 오래된 rec 통째 재저장 대신 patchRecord로 이 항목만 즉시 갱신
           if (usedOrigKey) idbDelete(usedOrigKey).catch(() => {});
-          const recsP = JSON.parse(localStorage.getItem('survey_records') || '[]');
-          const pIdx = recsP.findIndex(r => r.id === id);
-          if (pIdx !== -1) { recsP[pIdx] = rec; localStorage.setItem('survey_records', JSON.stringify(recsP)); }
+          patchRecord(id, r => {
+            const item = (r.photoList || []).find(x => x.filename === p.filename);
+            if (item) item.uploaded = true;
+            refreshSynced(r);
+          });
         } catch(photoErr) {
           failedPhotos++;
           console.warn('사진 업로드 실패:', p.filename, photoErr);
@@ -5326,9 +5428,7 @@ async function reuploadRecord(id) {
         return;
       }
     }
-    // 결과 저장
-    const idx = records.findIndex(r => r.id === id);
-    if (idx !== -1) { records[idx] = rec; localStorage.setItem('survey_records', JSON.stringify(records)); }
+    // soil/tree/사진 각각 성공 시점에 patchRecord로 이미 즉시 반영됨 — 오래된 rec 통째 재저장 없음
     showToast('✅ ' + rec.plotNo + ' 재업로드 완료!', 'success');
     // 모든 사진 성공 시 IDB 원본 클리어 (다음 조사지 빈 슬롯 정확히 인식)
     for (let i = 0; i < 12; i++) idbDelete('photo_' + i).catch(() => {});
