@@ -5313,6 +5313,11 @@ function setFilter(f, btn) {
 }
 
 // ====== 목록 렌더링 ======
+// 서버가 준 오류 메시지 등 신뢰할 수 없는 문자열을 innerHTML에 꽂기 전에 이스케이프한다.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function renderRecordsList() {
   const records = JSON.parse(localStorage.getItem('survey_records') || '[]');
   const container = document.getElementById('records-list');
@@ -5378,6 +5383,23 @@ function renderRecordsList() {
             ? '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">사진 없음</span>'
             : badge(photoDone, '사진 ' + photos.filter(p=>p.uploaded).length + '/' + photos.length)}
         </div>
+        ${(() => {
+          const ue = r.uploadErrors;
+          if (!ue) return '';
+          const items = [];
+          if (ue.soil) items.push({ stage: '입지·토양', ...ue.soil });
+          if (ue.tree) items.push({ stage: '임목조사', ...ue.tree });
+          Object.entries(ue.photos || {}).forEach(([fn, e]) => items.push({ stage: '사진 ' + fn, ...e }));
+          if (items.length === 0) return '';
+          items.sort((a, b) => (b.atMs || 0) - (a.atMs || 0));
+          const latest = items[0];
+          const restCount = items.length - 1;
+          const reason = latest.checkFailed ? 'Drive 존재 확인 실패 — ' + latest.message : latest.message;
+          return `<div style="padding:4px 14px;font-size:11px;color:#C0392B;">
+            마지막 오류: [${escapeHtml(latest.stage)}] ${escapeHtml(reason)} (${escapeHtml(latest.at)})
+            ${restCount > 0 ? `<br>그 외 실패 ${restCount}건` : ''}
+          </div>`;
+        })()}
 
         <div style="padding:4px 14px 8px;text-align:right;border-top:0.5px solid var(--gray-border);">
           <span style="font-size:10px;color:var(--text-sub);">${r.savedAt}</span>
