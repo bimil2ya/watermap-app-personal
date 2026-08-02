@@ -1983,9 +1983,11 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
     const _zipExistingPhotoMap = {};
     (_zipExistingRec?.photoList || []).forEach(p => { _zipExistingPhotoMap[p.filename] = p; });
     // 일반 사진 (12장)
+    // onlyNew=true면 원본(idbOrigKey)이 있는 것만 포함한다 — 보조 캐시 폴백은 원본이 지워진(이미 업로드된)
+    // 사진에서만 쓰이므로, 폴백까지 포함하면 "새로 찍은 사진만"이라는 의도와 어긋난다.
     for (const [idx, p] of Object.entries(photoData)) {
       let stored = await idbGet(idbOrigKey(plotNo, idx));
-      if (!stored) {
+      if (!stored && !onlyNew) {
         const cached = await idbGet('photo_' + idx);
         const prev = _zipExistingPhotoMap[p.filename];
         if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
@@ -1998,7 +2000,7 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
     // 이동사진 (최대 4장)
     for (const [idx, p] of Object.entries(movePhotoData)) {
       let stored = await idbGet(idbMoveOrigKey(plotNo, idx));
-      if (!stored) {
+      if (!stored && !onlyNew) {
         const cached = await idbGet('move_photo_' + idx);
         const prev = _zipExistingPhotoMap[p.filename];
         if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
@@ -5965,13 +5967,17 @@ function deleteRecord(id) {
   const label = '표준지 ' + target.plotNo + ' (' + (target.date || '날짜 미입력') + ')';
   if (!confirm('삭제하시겠습니까?\n\n' + label + '\n\n※ 기기에서만 삭제됩니다. 이미 업로드된 데이터는 Google Sheets에 그대로 남아있습니다.')) return;
 
-  // orig_plotNo_N IDB 클리어 (저장목록 삭제 시 원본 사진 데이터도 정리)
+  // 원본·썸네일·뷰어 캐시 전부 정리 (저장목록 삭제 시 고아 데이터가 IndexedDB에 남지 않게 함)
   const pn = target.plotNo;
   for (let i = 0; i < 12; i++) {
     idbDelete(idbOrigKey(pn, i)).catch(() => {});
+    idbDelete(idbThumbKey(pn, i)).catch(() => {});
+    idbDelete(idbViewKey(pn, i)).catch(() => {});
   }
   for (let i = 0; i < 4; i++) {
     idbDelete(idbMoveOrigKey(pn, i)).catch(() => {});
+    idbDelete(idbMoveThumbKey(pn, i)).catch(() => {});
+    idbDelete(idbMoveViewKey(pn, i)).catch(() => {});
   }
 
   const updated = records.filter(r => r.id !== id);
