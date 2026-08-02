@@ -1,7 +1,7 @@
 {
-  "name": "물지도 전자야장",
-  "short_name": "물지도야장",
-  "description": "물지도 산림 현장조사 전자야장",
+  "name": "물지도 전자야장 (경호버전)",
+  "short_name": "경호버전",
+  "description": "물지도 산림 현장조사 전자야장 (개인 커스텀 포크)",
   "start_url": "./watermap_V100.html",
   "display": "standalone",
   "orientation": "portrait",
