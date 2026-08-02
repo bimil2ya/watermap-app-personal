@@ -142,6 +142,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .photo-slot.portrait-slot .photo-dir-badge { background: #F5A623; color: #412402; }
 .photo-slot.landscape-slot { outline: 2.5px solid #0A5C45; background: #F0FFF8; }
 .photo-slot.landscape-slot .photo-dir-badge { background: #0A5C45; }
+.photo-slot.photo-auto-advance-highlight { box-shadow: inset 0 0 0 2.5px #F4C430; }
 .photo-dir-badge { position: absolute; top: 4px; right: 4px; color: white; font-size: 10px; font-weight: 700; padding: 2px 5px; border-radius: 4px; z-index: 2; }
 @keyframes photoShake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
 .photo-slot svg { width: clamp(18px, 5vw, 26px); height: clamp(18px, 5vw, 26px); stroke: var(--gray-text); fill: none; stroke-width: 1.5; }
@@ -1582,6 +1583,85 @@ let currentTab = 'tab-soil';
 let treeRowCount = 0;
 let photoData = {};
 let deletedPhotoFilenames = new Set(); // 현재 편집 세션에서 UI로 명시적으로 삭제한 사진 filename — photoList 병합 시 되살리기 방지용
+let photoSlotsManuallyModified = new Set(); // 삭제되거나 재촬영된 적 있는 슬롯 idx — 저장 성공에도 유지, 새로고침 시엔 초기화됨(의도된 제약)
+let _photoEditSession = 0; // _doReset() 호출마다 증가 — 그 이전에 시작된 비동기 촬영 처리 결과를 무효화
+
+// 사진촬영 탭 자동 진행 순서 — 전토심(9)·토양단면(10)은 사전 준비가 필요해 제외, 서_4M_울폐도(8) 다음은 지표면(11)으로 건너뜀
+const PHOTO_AUTO_CHAIN = [0,1,2,3,4,5,6,7,8,11];
+
+let _advanceScrollTimer = null;
+let _advanceSheetTimer = null;
+let _advanceHighlightClearTimer = null;
+let _advanceHighlightedSlot = null;
+
+function cancelAutoAdvance() {
+  if (_advanceScrollTimer) { clearTimeout(_advanceScrollTimer); _advanceScrollTimer = null; }
+  if (_advanceSheetTimer) { clearTimeout(_advanceSheetTimer); _advanceSheetTimer = null; }
+  if (_advanceHighlightClearTimer) { clearTimeout(_advanceHighlightClearTimer); _advanceHighlightClearTimer = null; }
+  if (_advanceHighlightedSlot) {
+    _advanceHighlightedSlot.classList.remove('photo-auto-advance-highlight');
+    _advanceHighlightedSlot = null;
+  }
+}
+
+function advanceToNextPhotoSlot(idx) {
+  cancelAutoAdvance(); // 방어적으로 기존 예약·강조 정리 후 시작
+
+  const pos = PHOTO_AUTO_CHAIN.indexOf(idx);
+  if (pos === -1) return; // 체인에 없는 슬롯(전토심/토양단면)
+
+  if (pos === PHOTO_AUTO_CHAIN.length - 1) {
+    // 지표면까지 도달 — 실제로 10개소 전부 채워졌는지 확인 후 안내
+    _advanceScrollTimer = setTimeout(() => {
+      _advanceScrollTimer = null;
+      if (currentTab !== 'tab-photo') return;
+      const allComplete = PHOTO_AUTO_CHAIN.every(slotIdx => !!photoData[slotIdx]);
+      showToast(allComplete ? '📷 10개소 촬영 완료' : '📷 지표면 사진이 저장되었습니다', 'success');
+    }, 900);
+    return;
+  }
+
+  const nextIdx = PHOTO_AUTO_CHAIN[pos + 1];
+  const nextLabel = PHOTO_SLOTS_LABEL[nextIdx]; // 이 10개 라벨엔 '2'가 없어 .replace() 불필요
+
+  _advanceScrollTimer = setTimeout(() => {
+    _advanceScrollTimer = null;
+    if (currentTab !== 'tab-photo') return;
+
+    const nextSlot = document.getElementById('photo-slot-' + nextIdx);
+    if (!nextSlot) return; // 슬롯 DOM을 못 찾는 비정상 상태면 아무 것도 안 하고 종료
+
+    const alreadyFilled = !!photoData[nextIdx];
+
+    showToast(alreadyFilled
+      ? '다음 순서: ' + nextLabel + ' — 이미 촬영되어 자동 진행을 멈췄습니다'
+      : '다음: ' + nextLabel, 'info');
+
+    nextSlot.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    nextSlot.classList.add('photo-auto-advance-highlight');
+    _advanceHighlightedSlot = nextSlot;
+
+    if (alreadyFilled) {
+      // 뒤이어 시트가 안 열리므로 이 강조는 스스로 정리돼야 함
+      _advanceHighlightClearTimer = setTimeout(() => {
+        _advanceHighlightClearTimer = null;
+        if (_advanceHighlightedSlot === nextSlot) {
+          nextSlot.classList.remove('photo-auto-advance-highlight');
+          _advanceHighlightedSlot = null;
+        }
+      }, 2000);
+      return; // 시트는 열지 않고 여기서 멈춤
+    }
+
+    // 0.7초 뒤 열리는 openPhotoSheet()의 cancelAutoAdvance()가 강조를 정리해줌 — 별도 타이머 불필요
+    _advanceSheetTimer = setTimeout(() => {
+      _advanceSheetTimer = null;
+      if (currentTab !== 'tab-photo') return;
+      openPhotoSheet('empty', 'photo', nextIdx, PHOTO_SLOTS_LABEL[nextIdx]);
+    }, 700);
+  }, 900);
+}
+
 let _isUploading = false; // 업로드 중 중복 방지 플래그
 
 // ====== IndexedDB ======
@@ -2465,6 +2545,7 @@ function switchTab(id, btn) {
   document.getElementById(id).classList.add('active');
   if (btn) btn.classList.add('active');
   currentTab = id;
+  if (id !== 'tab-photo') cancelAutoAdvance();
   if (id === 'tab-photo') syncPlotNo();
   if (id === 'tab-list') renderRecordsList();
 
@@ -3962,7 +4043,7 @@ function buildPhotoGrid() {
     input.accept = 'image/jpeg,image/png,image/jpg,image/webp';
     // capture는 촬영 시에만 동적으로 추가 (갤러리 불러오기 호환)
     input.style.display = 'none';
-    input.addEventListener('change', (ev) => handlePhoto(ev, i));
+    input.addEventListener('change', (ev) => handlePhoto(ev, i, false));
     item.appendChild(input);
 
     grid.appendChild(item);
@@ -3989,6 +4070,7 @@ function updatePhotoNames() {
 let _sheetState = null; // { type: 'photo'|'move', idx, state: 'empty'|'filled' }
 
 function openPhotoSheet(state, type, idx, slotName) {
+  cancelAutoAdvance();
   _sheetState = { state, type, idx };
   const label  = document.getElementById('photo-sheet-label');
   const btn1   = document.getElementById('photo-sheet-btn1');
@@ -4113,7 +4195,7 @@ function triggerPhotoCamera(idx) {
   newInp.style.display = 'none';
   newInp.addEventListener('change', (ev) => {
     if (!ev.target.files || ev.target.files.length === 0) { _photoProcessing = false; return; }
-    handlePhoto(ev, idx);
+    handlePhoto(ev, idx, true);
   });
   newInp.addEventListener('cancel', () => { _photoProcessing = false; });
   parent.replaceChild(newInp, old);
@@ -4150,7 +4232,7 @@ function triggerPhotoGallery(idx) {
   newInp.id = 'photo-input-' + idx;
   newInp.accept = 'image/jpeg,image/png,image/jpg,image/webp';
   newInp.style.display = 'none';
-  newInp.addEventListener('change', (ev) => handlePhoto(ev, idx));
+  newInp.addEventListener('change', (ev) => handlePhoto(ev, idx, false));
   parent.replaceChild(newInp, old);
   setTimeout(() => newInp.click(), 50);
 }
@@ -4215,7 +4297,7 @@ function triggerPhoto(idx) {
 
 let _photoProcessing = false; // 동시 처리 방지
 
-function handlePhoto(event, idx) {
+function handlePhoto(event, idx, fromCamera) {
   const file = event.target.files[0];
   if (!file) return;
 
@@ -4231,6 +4313,9 @@ function handlePhoto(event, idx) {
 
   const plotNo = document.getElementById('soil-plot-no').value || 'NOPLOT';
   const filename = plotNo + '(' + PHOTO_SLOTS[idx] + ').jpg';
+  const wasFilledBeforeThisShot = !!photoData[idx];
+  const wasEmptyBeforeThisShot = !wasFilledBeforeThisShot && !photoSlotsManuallyModified.has(idx);
+  const mySession = _photoEditSession;
   const PORTRAIT_SLOTS = ['전토심', '토양단면'];
   const isPortrait = PORTRAIT_SLOTS.includes(PHOTO_SLOTS[idx]);
 
@@ -4290,8 +4375,17 @@ function handlePhoto(event, idx) {
         showToast('사진 저장 실패 — 다시 촬영해주세요.', 'error');
         return;
       }
+      if (mySession !== _photoEditSession) {
+        // 그 사이 초기화가 일어남 — 이 결과는 무효. 화면 반영 없이, 방금 쓴 원본도 정리
+        await idbDelete(idbOrigKey(plotNo, idx)).catch(console.warn);
+        clearTimeout(_safetyTimer);
+        _photoProcessing = false;
+        return;
+      }
+
       idbSet('photo_' + idx, { base64, filename, captureId }).catch(err => console.warn('보조 캐시 저장 실패', err));
       photoData[idx] = { filename };
+      if (wasFilledBeforeThisShot) photoSlotsManuallyModified.add(idx);
       saveDraft(); // 사진 저장 직후 즉시 draft 저장
 
       // 썸네일: 조사지번호 포함 키로 영구 저장 (복원용)
@@ -4323,6 +4417,7 @@ function handlePhoto(event, idx) {
         slot.style.cursor = 'pointer';
         slot.onclick = () => openPhotoSheet('filled', 'photo', idx, PHOTO_SLOTS_LABEL[idx]);
         showToast('사진 추가됨: ' + PHOTO_SLOTS[idx] + ' (' + kb + 'KB)', 'success');
+        if (fromCamera && wasEmptyBeforeThisShot) advanceToNextPhotoSlot(idx);
         clearTimeout(_safetyTimer);
         _photoProcessing = false;
       });
@@ -4354,6 +4449,7 @@ async function deletePhoto(idx) {
   }
   delete photoData[idx];
   if (_delPlotNo) deletedPhotoFilenames.add(filename);
+  photoSlotsManuallyModified.add(idx);
   const _delOps = [idbDelete('photo_' + idx)];
   if (_delPlotNo) {
     _delOps.push(idbDelete(idbOrigKey(_delPlotNo, idx)));
@@ -5254,6 +5350,8 @@ function getTreeRows() {
 // ====== 초기화 ======
 // 내부 초기화 로직 (confirm 없음 — onPlotSelect에서 호출)
 function _doReset() {
+  _photoEditSession++;
+  cancelAutoAdvance();
   // 설정탭 입력값 제외하고 초기화
   const KEEP_IDS = ['setting-script-url', 'setting-drive-folder', 'setting-team-code', 'setting-team-code-top'];
   const RESET_READONLY = ['soil-basin', 'soil-basin-code']; // readonly지만 초기화 필요한 항목
@@ -5276,6 +5374,7 @@ function _doReset() {
   photoData = {};
   movePhotoData = {};
   deletedPhotoFilenames = new Set();
+  photoSlotsManuallyModified = new Set();
   buildPhotoGrid();
   setTodayDate();
   loadDefaults();
