@@ -133,6 +133,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .toggle-btn.on { background: var(--green-light); border-color: var(--green); color: var(--green-dark); }
 .toggle-btn.off { background: #FFF0EE; border-color: #E57373; color: #C0392B; }
 
+/* 선택지가 적은 select 옆에 붙는 빠른 선택 버튼 — select 자체는 그대로 두고(필수입력 검사에 영향 없음)
+   버튼을 누르면 select.value를 채우고 change 이벤트를 발생시켜 기존 로직(자동 스크롤 등)을 그대로 탄다 */
+.quick-pick-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.quick-pick-btn { flex: 1 1 auto; min-width: 52px; padding: 10px 6px; text-align: center; border: 1.5px solid var(--gray-border); border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; background: var(--white); color: var(--text-sub); transition: all 0.15s; }
+.quick-pick-btn.selected { background: var(--green); border-color: var(--green-dark); color: #fff; font-weight: 700; }
+
 /* 사진 그리드 */
 .photo-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; }
 .photo-item { border-radius: var(--radius-sm); border: 1.5px solid var(--gray-border); overflow: hidden; background: var(--gray-bg); }
@@ -1924,6 +1930,7 @@ async function restoreDraft(plotNo) {
       }
     }
     console.log('draft 복원 완료');
+    syncAllQuickPickHighlights();
     return true;
   } catch(e) { console.warn('draft 복원 실패', e); return false; }
 }
@@ -2175,6 +2182,7 @@ function loadRecord(id) {
   // 조사지이동 카드 토글 + syncToTree
   toggleMovePhotoCard();
   syncToTree();
+  syncAllQuickPickHighlights();
 
   // 입지토양 탭으로 이동
   const soilBtn = document.querySelector('.nav-btn[onclick*="tab-soil"]');
@@ -2211,6 +2219,10 @@ const TEAM_CODE = '';   // 예: '1팀', '2팀' ... 비워두면 설정탭에서 
 document.addEventListener('DOMContentLoaded', () => {
   buildSelectOptions();
   labelizeSelectPlaceholders();
+  // 선택지가 적은 필수입력 select에 빠른 선택 버튼 추가 (탭 수 줄이기 — select 자체와 필수입력 검사는 그대로)
+  ['soil-erosion', 'soil-deposit', 'soil-wind', 'soil-rock', 'soil-weathering',
+   'soil-moist-a', 'soil-moist-b', 'soil-100cc-10', 'soil-100cc-30', 'soil-chem-10', 'soil-chem-30']
+    .forEach(buildQuickPicker);
   buildMunsellOptions();
   buildPhotoGrid();
   buildTreeTable();
@@ -2304,6 +2316,50 @@ function labelizeSelectPlaceholders() {
     const label = sel.closest('.field')?.querySelector('label')?.textContent?.trim();
     if (label) opt.textContent = label + ' 선택';
   });
+}
+
+// select는 그대로 두고(필수입력 검사·초안 저장·데이터 읽기 로직 전부 불변) 옆에 빠른 선택 버튼만 추가한다.
+// 버튼을 누르면 select.value를 채우고 change 이벤트를 발생시켜, 기존 onchange(자동 스크롤 등)를 그대로 탄다.
+const _quickPickRows = {}; // selectId -> { row, sel } — draft/레코드 복원처럼 change 이벤트 없이 값이
+                            // 바뀌는 경로에서도 버튼 강조를 다시 맞출 수 있도록 등록해둔다.
+function buildQuickPicker(selectId) {
+  const sel = document.getElementById(selectId);
+  if (!sel || sel.dataset.quickPickBuilt) return;
+  const options = Array.from(sel.options).filter(o => o.value !== '');
+  if (options.length === 0) return;
+  sel.dataset.quickPickBuilt = 'true';
+
+  const row = document.createElement('div');
+  row.className = 'quick-pick-row';
+  options.forEach(opt => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quick-pick-btn';
+    btn.textContent = opt.textContent;
+    btn.addEventListener('click', () => {
+      if (sel.disabled) return;
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    row.appendChild(btn);
+  });
+  sel.insertAdjacentElement('afterend', row);
+
+  _quickPickRows[selectId] = { row, sel };
+  sel.addEventListener('change', () => syncQuickPickHighlight(selectId));
+  syncQuickPickHighlight(selectId);
+}
+function syncQuickPickHighlight(selectId) {
+  const entry = _quickPickRows[selectId];
+  if (!entry) return;
+  Array.from(entry.row.children).forEach(btn => {
+    btn.classList.toggle('selected', btn.textContent === entry.sel.value);
+  });
+}
+// draft 복원(restoreDraft)·레코드 불러오기(_restoreRecordData)처럼 select.value를 change 이벤트 없이
+// 직접 바꾸는 경로 끝에서 호출해, 버튼 강조가 실제 값과 어긋나지 않게 한다.
+function syncAllQuickPickHighlights() {
+  Object.keys(_quickPickRows).forEach(syncQuickPickHighlight);
 }
 
 function setTodayDate() {
@@ -5285,6 +5341,7 @@ function _restoreRecordData(rec) {
       slot.onclick = () => openPhotoSheet('filled', 'move', idx, slotName);
     }));
   }
+  syncAllQuickPickHighlights();
 }
 
 function saveDefaultSettings() {
@@ -5531,6 +5588,7 @@ function _doReset() {
     plotDisplayReset.style.color = 'var(--text-sub)';
     plotDisplayReset.style.fontWeight = '';
   }
+  syncAllQuickPickHighlights();
 }
 
 // 초기화 버튼용 (confirm 팝업 있음)
