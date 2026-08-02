@@ -3888,6 +3888,50 @@ function buildHeightOpts() {
   return o;
 }
 
+// 수종명·흉고직경 "위와 동일" 단축 선택 — 값을 미리 채우지 않고 목록에 단축 옵션만 끼워 넣는다.
+// getTreeRows()는 수종/흉고직경/수고 중 하나만 있어도 그 행을 저장 대상으로 삼으므로(값 사전입력 금지),
+// 사용자가 실제로 무언가 선택해야만 값이 채워지도록 한다.
+function setRowShortcut(selectEl, value) {
+  if (!selectEl || selectEl.value !== '') return; // 대상에 이미 값이 있으면 아무 것도 안 함 — 확정된 선택 보호
+  selectEl.querySelector('option[data-shortcut="true"]')?.remove();
+  if (!value) return;
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = '↑ ' + value + ' (위와 동일)';
+  opt.dataset.shortcut = 'true';
+  selectEl.insertBefore(opt, selectEl.options[1] || null);
+}
+
+function syncNextRowShortcuts(i) {
+  if (i >= TREE_TOTAL) return;
+  const nextSpecies = document.getElementById('tr-species-' + (i + 1));
+  const nextDbh = document.getElementById('tr-dbh-' + (i + 1));
+  const species = document.getElementById('tr-species-' + i)?.value || '';
+  const dbh = document.getElementById('tr-dbh-' + i)?.value || '';
+
+  if (!species || !dbh) {
+    setRowShortcut(nextSpecies, '');
+    setRowShortcut(nextDbh, '');
+    return;
+  }
+  setRowShortcut(nextSpecies, species);
+  setRowShortcut(nextDbh, dbh);
+}
+
+// 단축 옵션을 선택하면 그 즉시 원래(정식) option으로 선택 상태를 옮긴다 — 값·화면 문구·후속 갱신을 항상 일관되게 유지.
+function commitShortcutSelection(selectEl) {
+  if (!selectEl) return;
+  const selected = selectEl.options[selectEl.selectedIndex];
+  const shortcut = selectEl.querySelector('option[data-shortcut="true"]');
+  if (shortcut && shortcut === selected) {
+    const value = shortcut.value;
+    shortcut.remove();
+    selectEl.value = value; // 같은 값을 가진 원래(정식) option으로 선택 상태를 옮김
+  } else if (shortcut) {
+    shortcut.remove(); // 사용자가 원래 목록의 다른 값을 직접 선택한 경우 — 안 쓴 단축만 정리
+  }
+}
+
 function buildTreeTable() {
   const tbody = document.getElementById('tree-tbody');
   if (!tbody) return;
@@ -3917,6 +3961,8 @@ function buildTreeTable() {
     selSpec.style.cssText = selStyle;
     selSpec.innerHTML = specOpts;
     selSpec.addEventListener('change', () => {
+      commitShortcutSelection(selSpec);
+      syncNextRowShortcuts(i);
       focusNext('tr-dbh-' + i);
     });
     tdSpec.appendChild(selSpec);
@@ -3930,8 +3976,10 @@ function buildTreeTable() {
     selDbh.style.cssText = selStyle;
     selDbh.innerHTML = dbhOpts;
     selDbh.addEventListener('change', () => {
+      commitShortcutSelection(selDbh);
       // 빨간 강조 제거
       selDbh.style.background = 'transparent';
+      syncNextRowShortcuts(i);
       // 다음 행 수종명으로 이동
       if (i < TREE_TOTAL) focusNext('tr-species-' + (i + 1));
     });
