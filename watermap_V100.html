@@ -4164,7 +4164,7 @@ function updatePhotoNames() {
   const pn = document.getElementById('soil-plot-no').value || '';
   const preview = document.getElementById('photo-name-preview');
   if (pn) {
-    preview.innerHTML = '<strong style="color:var(--green-dark)">' + pn + '</strong>(C_울폐도).jpg';
+    preview.innerHTML = '<strong style="color:var(--green-dark)">' + escapeHtml(pn) + '</strong>(C_울폐도).jpg';
   } else {
     preview.innerHTML = '<span class="placeholder">[조사지번호]</span>(C_울폐도).jpg';
   }
@@ -4731,19 +4731,20 @@ function applyLoadedPlots(plots, teamCode) {
     return Object.keys(groups).sort((a, b) => (parseInt(a)||9999) - (parseInt(b)||9999));
   }
 
-  let optHtml = `<option value="">— ${teamCode} · 총${total}개 (미완료 ${todoCount}개) —</option>`;
+  let optHtml = `<option value="">— ${escapeHtml(teamCode)} · 총${total}개 (미완료 ${todoCount}개) —</option>`;
 
   // ── 미완료 그룹 (위) — 주황색 배경 헤더 ─────────────────────
+  // plotNo/week는 서버(구글 시트 포인트 목록)에서 온 값이라 반드시 이스케이프한다 — fillTeamDropdowns와 동일한 원칙.
   if (todoPlots.length > 0) {
     const todoWeekGroups = groupByWeek(todoPlots);
     const todoWeekKeys   = sortedWeekKeys(todoWeekGroups);
     if (todoWeekKeys.length > 1) {
       todoWeekKeys.forEach(week => {
         const group = todoWeekGroups[week];
-        optHtml += `<optgroup label="🟠 ${week}주차 · 미완료 ${group.length}개">`;
+        optHtml += `<optgroup label="🟠 ${escapeHtml(week)}주차 · 미완료 ${group.length}개">`;
         group.forEach(p => {
           const plotNo = typeof p === 'string' ? p : p.plotNo;
-          optHtml += `<option value="${plotNo}" style="color:#E07B00;font-weight:700;">　${plotNo}</option>`;
+          optHtml += `<option value="${escapeHtml(plotNo)}" style="color:#E07B00;font-weight:700;">　${escapeHtml(plotNo)}</option>`;
         });
         optHtml += '</optgroup>';
       });
@@ -4751,7 +4752,7 @@ function applyLoadedPlots(plots, teamCode) {
       optHtml += `<optgroup label="🟠 미완료 ${todoPlots.length}개">`;
       todoPlots.forEach(p => {
         const plotNo = typeof p === 'string' ? p : p.plotNo;
-        optHtml += `<option value="${plotNo}" style="color:#E07B00;font-weight:700;">　${plotNo}</option>`;
+        optHtml += `<option value="${escapeHtml(plotNo)}" style="color:#E07B00;font-weight:700;">　${escapeHtml(plotNo)}</option>`;
       });
       optHtml += '</optgroup>';
     }
@@ -4764,10 +4765,10 @@ function applyLoadedPlots(plots, teamCode) {
     if (doneWeekKeys.length > 1) {
       doneWeekKeys.forEach(week => {
         const group = doneWeekGroups[week];
-        optHtml += `<optgroup label="🟢 ${week}주차 · 완료 ${group.length}개">`;
+        optHtml += `<optgroup label="🟢 ${escapeHtml(week)}주차 · 완료 ${group.length}개">`;
         group.forEach(p => {
           const plotNo = typeof p === 'string' ? p : p.plotNo;
-          optHtml += `<option value="${plotNo}" style="color:#2E7D32;font-weight:700;">　✓ ${plotNo}</option>`;
+          optHtml += `<option value="${escapeHtml(plotNo)}" style="color:#2E7D32;font-weight:700;">　✓ ${escapeHtml(plotNo)}</option>`;
         });
         optHtml += '</optgroup>';
       });
@@ -4775,7 +4776,7 @@ function applyLoadedPlots(plots, teamCode) {
       optHtml += `<optgroup label="🟢 완료 ${donePlots.length}개">`;
       donePlots.forEach(p => {
         const plotNo = typeof p === 'string' ? p : p.plotNo;
-        optHtml += `<option value="${plotNo}" style="color:#2E7D32;font-weight:700;">　✓ ${plotNo}</option>`;
+        optHtml += `<option value="${escapeHtml(plotNo)}" style="color:#2E7D32;font-weight:700;">　✓ ${escapeHtml(plotNo)}</option>`;
       });
       optHtml += '</optgroup>';
     }
@@ -4825,10 +4826,44 @@ function buildCustomPlotList(plots, teamCode, todoCount, total) {
     return Object.keys(g).sort((a,b) => (parseInt(a)||9999)-(parseInt(b)||9999));
   }
 
-  let html = `<div onclick="selectCustomPlot('')"
-    style="padding:12px 14px;font-size:14px;color:var(--text-sub);border-bottom:1px solid var(--gray-border);background:var(--gray-bg);">
-    — ${teamCode} · 총${total}개 (미완료 ${todoCount}개) —
-  </div>`;
+  // plotNo/week/teamCode는 서버(구글 시트 포인트 목록)에서 온 값이라 신뢰할 수 없다 — onclick 문자열에
+  // 끼워 넣으면 escapeHtml()로도 막을 수 없다(속성값 이스케이프는 태그 파싱 단계의 속성 경계만 보호할
+  // 뿐, HTML 파서가 엔티티를 디코딩한 최종 문자열이 그대로 인라인 이벤트 핸들러의 JS 소스가 되기 때문 —
+  // 실제로 홑따옴표를 ' → &#39;로 이스케이프해도 onclick 핸들러 안에서는 다시 '로 해석돼 스크립트가
+  // 실행되는 것을 확인함). 그래서 문자열 조립 대신 DOM을 직접 생성하고 addEventListener로 클릭을 연결한다.
+  list.innerHTML = '';
+
+  function makeHeaderRow(text, bg, border, color) {
+    const div = document.createElement('div');
+    div.style.cssText = `padding:8px 14px;font-size:12px;font-weight:700;color:${color};background:${bg};border-bottom:1px solid ${border};`;
+    div.textContent = text;
+    return div;
+  }
+  function makePlotRow(pn, color, hoverBg, checked) {
+    const div = document.createElement('div');
+    div.style.cssText = `padding:12px 18px;font-size:16px;font-weight:700;color:${color};border-bottom:1px solid var(--gray-border);cursor:pointer;background:var(--white);`;
+    div.addEventListener('mousedown', () => { div.style.background = hoverBg; });
+    div.addEventListener('mouseup',   () => { div.style.background = 'var(--white)'; });
+    div.addEventListener('touchstart',() => { div.style.background = hoverBg; });
+    div.addEventListener('touchend',  () => { div.style.background = 'var(--white)'; });
+    div.addEventListener('click', () => selectCustomPlot(pn));
+    if (checked) {
+      const span = document.createElement('span');
+      span.style.fontWeight = '700';
+      span.textContent = '✓ ' + pn;
+      div.appendChild(span);
+    } else {
+      div.textContent = pn;
+    }
+    return div;
+  }
+
+  const headerDiv = document.createElement('div');
+  headerDiv.style.cssText = 'padding:12px 14px;font-size:14px;color:var(--text-sub);border-bottom:1px solid var(--gray-border);background:var(--gray-bg);';
+  headerDiv.textContent = `— ${teamCode} · 총${total}개 (미완료 ${todoCount}개) —`;
+  headerDiv.style.cursor = 'pointer';
+  headerDiv.addEventListener('click', () => selectCustomPlot(''));
+  list.appendChild(headerDiv);
 
   // 미완료 그룹
   if (todoPlots.length > 0) {
@@ -4836,27 +4871,17 @@ function buildCustomPlotList(plots, teamCode, todoCount, total) {
     const tk = sortedWeekKeys(tg);
     if (tk.length > 1) {
       tk.forEach(week => {
-        html += `<div style="padding:8px 14px;font-size:12px;font-weight:700;color:#E07B00;background:#FFF8F0;border-bottom:1px solid #FFE0B2;">🟠 ${week}주차 · 미완료 ${tg[week].length}개</div>`;
+        list.appendChild(makeHeaderRow(`🟠 ${week}주차 · 미완료 ${tg[week].length}개`, '#FFF8F0', '#FFE0B2', '#E07B00'));
         tg[week].forEach(p => {
           const pn = typeof p === 'string' ? p : p.plotNo;
-          html += `<div onclick="selectCustomPlot('${pn}')"
-            style="padding:12px 18px;font-size:16px;font-weight:700;color:#E07B00;border-bottom:1px solid var(--gray-border);cursor:pointer;background:var(--white);"
-            onmousedown="this.style.background='#FFF3E0'" onmouseup="this.style.background='var(--white)'"
-            ontouchstart="this.style.background='#FFF3E0'" ontouchend="this.style.background='var(--white)'">
-            ${pn}
-          </div>`;
+          list.appendChild(makePlotRow(pn, '#E07B00', '#FFF3E0', false));
         });
       });
     } else {
-      html += `<div style="padding:8px 14px;font-size:12px;font-weight:700;color:#E07B00;background:#FFF8F0;border-bottom:1px solid #FFE0B2;">🟠 미완료 ${todoPlots.length}개</div>`;
+      list.appendChild(makeHeaderRow(`🟠 미완료 ${todoPlots.length}개`, '#FFF8F0', '#FFE0B2', '#E07B00'));
       todoPlots.forEach(p => {
         const pn = typeof p === 'string' ? p : p.plotNo;
-        html += `<div onclick="selectCustomPlot('${pn}')"
-          style="padding:12px 18px;font-size:16px;font-weight:700;color:#E07B00;border-bottom:1px solid var(--gray-border);cursor:pointer;background:var(--white);"
-          onmousedown="this.style.background='#FFF3E0'" onmouseup="this.style.background='var(--white)'"
-          ontouchstart="this.style.background='#FFF3E0'" ontouchend="this.style.background='var(--white)'">
-          ${pn}
-        </div>`;
+        list.appendChild(makePlotRow(pn, '#E07B00', '#FFF3E0', false));
       });
     }
   }
@@ -4867,32 +4892,21 @@ function buildCustomPlotList(plots, teamCode, todoCount, total) {
     const dk = sortedWeekKeys(dg);
     if (dk.length > 1) {
       dk.forEach(week => {
-        html += `<div style="padding:8px 14px;font-size:12px;font-weight:700;color:#2E7D32;background:#F1F8F1;border-bottom:1px solid #C8E6C9;">🟢 ${week}주차 · 완료 ${dg[week].length}개</div>`;
+        list.appendChild(makeHeaderRow(`🟢 ${week}주차 · 완료 ${dg[week].length}개`, '#F1F8F1', '#C8E6C9', '#2E7D32'));
         dg[week].forEach(p => {
           const pn = typeof p === 'string' ? p : p.plotNo;
-          html += `<div onclick="selectCustomPlot('${pn}')"
-            style="padding:12px 18px;font-size:16px;font-weight:700;color:#2E7D32;border-bottom:1px solid var(--gray-border);cursor:pointer;background:var(--white);"
-            onmousedown="this.style.background='#F1F8F1'" onmouseup="this.style.background='var(--white)'"
-            ontouchstart="this.style.background='#F1F8F1'" ontouchend="this.style.background='var(--white)'">
-            <span style="font-weight:700;">✓ ${pn}</span>
-          </div>`;
+          list.appendChild(makePlotRow(pn, '#2E7D32', '#F1F8F1', true));
         });
       });
     } else {
-      html += `<div style="padding:8px 14px;font-size:12px;font-weight:700;color:#2E7D32;background:#F1F8F1;border-bottom:1px solid #C8E6C9;">🟢 완료 ${donePlots.length}개</div>`;
+      list.appendChild(makeHeaderRow(`🟢 완료 ${donePlots.length}개`, '#F1F8F1', '#C8E6C9', '#2E7D32'));
       donePlots.forEach(p => {
         const pn = typeof p === 'string' ? p : p.plotNo;
-        html += `<div onclick="selectCustomPlot('${pn}')"
-          style="padding:12px 18px;font-size:16px;font-weight:700;color:#2E7D32;border-bottom:1px solid var(--gray-border);cursor:pointer;background:var(--white);"
-          onmousedown="this.style.background='#F1F8F1'" onmouseup="this.style.background='var(--white)'"
-          ontouchstart="this.style.background='#F1F8F1'" ontouchend="this.style.background='var(--white)'">
-          <span style="font-weight:700;">✓ ${pn}</span>
-        </div>`;
+        list.appendChild(makePlotRow(pn, '#2E7D32', '#F1F8F1', true));
       });
     }
   }
 
-  list.innerHTML = html;
   display.textContent = '포인트 선택';
   display.style.color = 'var(--text-sub)';
   dropdown.style.display = 'block';
