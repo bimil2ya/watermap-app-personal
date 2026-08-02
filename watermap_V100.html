@@ -135,8 +135,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 
 /* 선택지가 적은 select 옆에 붙는 빠른 선택 버튼 — select 자체는 그대로 두고(필수입력 검사에 영향 없음)
    버튼을 누르면 select.value를 채우고 change 이벤트를 발생시켜 기존 로직(자동 스크롤 등)을 그대로 탄다 */
-.quick-pick-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-.quick-pick-btn { flex: 1 1 auto; min-width: 52px; padding: 10px 6px; text-align: center; border: 1.5px solid var(--gray-border); border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; background: var(--white); color: var(--text-sub); transition: all 0.15s; }
+.quick-pick-row { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
+.quick-pick-btn { flex: 1 1 auto; min-width: 40px; padding: 6px 5px; text-align: center; border: 1.5px solid var(--gray-border); border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600; cursor: pointer; background: var(--gray-bg); color: var(--text-sub); transition: all 0.15s; }
 .quick-pick-btn.selected { background: var(--green); border-color: var(--green-dark); color: #fff; font-weight: 700; }
 
 /* 사진 그리드 */
@@ -2335,7 +2335,12 @@ function buildQuickPicker(selectId) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'quick-pick-btn';
-    btn.textContent = opt.textContent;
+    btn.dataset.optValue = opt.value; // 선택 여부 판정은 항상 이 값으로만 한다 — 체크 표시로 라벨
+                                       // 텍스트가 바뀌어도(아래 label) 판정이 깨지지 않게 하기 위함
+    const label = document.createElement('span');
+    label.dataset.baseText = opt.textContent;
+    label.textContent = opt.textContent;
+    btn.appendChild(label);
     btn.addEventListener('click', () => {
       if (sel.disabled) return;
       sel.value = opt.value;
@@ -2353,7 +2358,11 @@ function syncQuickPickHighlight(selectId) {
   const entry = _quickPickRows[selectId];
   if (!entry) return;
   Array.from(entry.row.children).forEach(btn => {
-    btn.classList.toggle('selected', btn.textContent === entry.sel.value);
+    const isSelected = btn.dataset.optValue === entry.sel.value;
+    btn.classList.toggle('selected', isSelected);
+    const label = btn.firstElementChild;
+    // select 박스 자체에도 같은 값이 표시되므로, 버튼 쪽엔 체크 표시를 붙여 시각적으로 구분한다
+    label.textContent = isSelected ? '✓ ' + label.dataset.baseText : label.dataset.baseText;
   });
 }
 // draft 복원(restoreDraft)·레코드 불러오기(_restoreRecordData)처럼 select.value를 change 이벤트 없이
