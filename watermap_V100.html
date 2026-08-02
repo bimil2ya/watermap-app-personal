@@ -3611,27 +3611,36 @@ function buildMovePhotoGrid() {
     item.appendChild(input);
     grid.appendChild(item);
 
-    // 기존 movePhotoData에 사진이 있으면 슬롯 복원
+    // 기존 movePhotoData에 사진이 있으면 슬롯 복원 — 썸네일/원본은 plotNo 전용 키라 신뢰할 수 있으므로
+    // 이 둘만 사용한다. move_photo_N(전역 보조 캐시, 업로드 성공 시 정리됨)을 폴백으로 쓰지 않는다 —
+    // 이미 업로드된 사진은 이 키가 없을 수 있는데, 그걸 "사진 없음"으로 오판하면 안 되기 때문.
     if (movePhotoData[i]) {
-      idbGet('move_photo_' + i).then(stored => {
-        if (!stored || !stored.base64) return;
-        const plotNo = document.getElementById('soil-plot-no')?.value || '';
-        idbGet(idbMoveThumbKey(plotNo, i)).then(thumb => {
-          const src = thumb ? 'data:image/jpeg;base64,' + thumb.base64
-                            : 'data:image/jpeg;base64,' + stored.base64;
-          slotDiv.innerHTML = '';
-          const img = document.createElement('img');
-          img.src = src;
-          img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:4px;position:absolute;inset:0;';
-          const namDiv = document.createElement('div');
-          namDiv.className = 'photo-name';
-          namDiv.textContent = movePhotoData[i].filename || '';
-          slotDiv.appendChild(img);
-          slotDiv.appendChild(namDiv);
-          slotDiv.style.cursor = 'pointer';
-          slotDiv.onclick = () => openPhotoSheet('filled', 'move', i, MOVE_PHOTO_SLOTS_LABEL[i]);
-        });
-      });
+      const plotNo = document.getElementById('soil-plot-no')?.value || '';
+      (async () => {
+        let src = null;
+        const thumb = await idbGet(idbMoveThumbKey(plotNo, i));
+        if (thumb && thumb.base64) {
+          src = 'data:image/jpeg;base64,' + thumb.base64;
+        } else {
+          const orig = await idbGet(idbMoveOrigKey(plotNo, i));
+          if (orig && orig.base64) src = 'data:image/jpeg;base64,' + orig.base64;
+        }
+        if (!src) {
+          console.warn('이동사진 복원 실패 — 원본/썸네일을 찾을 수 없음:', plotNo, i);
+          return;
+        }
+        slotDiv.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = src;
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:4px;position:absolute;inset:0;';
+        const namDiv = document.createElement('div');
+        namDiv.className = 'photo-name';
+        namDiv.textContent = movePhotoData[i].filename || '';
+        slotDiv.appendChild(img);
+        slotDiv.appendChild(namDiv);
+        slotDiv.style.cursor = 'pointer';
+        slotDiv.onclick = () => openPhotoSheet('filled', 'move', i, MOVE_PHOTO_SLOTS_LABEL[i]);
+      })().catch(err => console.warn('이동사진 복원 중 오류', err));
     }
   });
 }
@@ -5958,10 +5967,11 @@ function deleteRecord(id) {
 }
 
 // ====== CSV 내보내기 ======
-// CSV를 Excel 등에서 열 때 =,+,-,@로 시작하는 값이 수식으로 해석되는 것을 방지
+// CSV를 Excel 등에서 열 때 =,+,-,@로 시작하는 값이 수식으로 해석되는 것을 방지 + 따옴표 이스케이프
 function csvSafeCell(v) {
   let s = String(v == null ? '' : v);
   if (/^[=+\-@]/.test(s)) s = "'" + s;
+  s = s.replace(/"/g, '""');
   return '"' + s + '"';
 }
 function exportCSV(type) {
@@ -5971,7 +5981,12 @@ function exportCSV(type) {
   let csv = '';
   if (type === 'soil') {
     const header = ['유역코드','중유역명','조사지번호','조사일','날씨','수행사','조사책임자','조사지이동필요성','좌표X','좌표Y','침식상태','퇴적양식','풍노출도','암석노출도','유기물층L','유기물층F','유기물층H','토심A','토심B','토색A','토색B','풍화정도','건습도A','건습도B','자갈함량A','자갈함량B','견밀도A','견밀도B','토양형','100cc_10cm','100cc_30cm','이화학성_10cm','이화학성_30cm','특이사항','주차'];
-    csv = header.join(',') + '\n' + records.map(r => r.soilRow.map(csvSafeCell).join(',')).join('\n');
+    const validRecords = records.filter(r => Array.isArray(r.soilRow));
+    const skippedCount = records.length - validRecords.length;
+    csv = header.join(',') + '\n' + validRecords.map(r => r.soilRow.map(csvSafeCell).join(',')).join('\n');
+    if (skippedCount > 0) {
+      showToast(`⚠️ ${skippedCount}건은 입지·토양 데이터가 없어 CSV에서 제외됐습니다`, 'error');
+    }
   } else {
     const header = ['유역명','유역코드','조사지번호','수행사','임종','번호','수종명','흉고직경(cm)','수고(m)','주차'];
     const rows = records.flatMap(r => r.treeRows || []);
