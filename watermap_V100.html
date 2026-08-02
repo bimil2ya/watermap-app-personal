@@ -2127,6 +2127,7 @@ const TEAM_CODE = '';   // 예: '1팀', '2팀' ... 비워두면 설정탭에서 
 
 document.addEventListener('DOMContentLoaded', () => {
   buildSelectOptions();
+  labelizeSelectPlaceholders();
   buildMunsellOptions();
   buildPhotoGrid();
   buildTreeTable();
@@ -2207,6 +2208,19 @@ function buildSelectOptions() {
   fillRange('soil-gravel-b', 0,  100, 1);
   fillRange('soil-density-a',1,  30,  1);
   fillRange('soil-density-b',1,  30,  1);
+}
+
+// select의 기본 "선택" placeholder를 "{필드명} 선택"으로 바꿔 iOS Safari의 좁은 메뉴형 팝업에서도
+// 어떤 항목을 고르는지 알 수 있게 한다. value=""는 그대로 두므로 필수입력 검사(validateTab)에는 영향 없다.
+// 이미 "계열 선택"/"포인트 선택"/"팀 선택"처럼 구체적인 문구를 쓰는 select는 텍스트가 정확히 "선택"이
+// 아니므로 자동으로 건드리지 않는다.
+function labelizeSelectPlaceholders() {
+  document.querySelectorAll('.field select').forEach(sel => {
+    const opt = sel.options[0];
+    if (!opt || opt.value !== '' || opt.textContent !== '선택') return;
+    const label = sel.closest('.field')?.querySelector('label')?.textContent?.trim();
+    if (label) opt.textContent = label + ' 선택';
+  });
 }
 
 function setTodayDate() {
@@ -3736,7 +3750,7 @@ function updateMunsellDetail(ab) {
   }
 
   const items = MUNSELL_DATA[hue] || [];
-  detailEl.innerHTML = '<option value="">선택</option>' +
+  detailEl.innerHTML = '<option value="">세부값 선택</option>' +
     items.map(v => '<option>' + hue + ' ' + v + '</option>').join('');
   detailEl.disabled = false;
   detailEl.value = '';
