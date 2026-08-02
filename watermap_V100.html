@@ -3930,6 +3930,26 @@ function setRowShortcut(selectEl, value) {
   selectEl.insertBefore(opt, selectEl.options[1] || null);
 }
 
+// 흉고직경은 "정확히 같은 값"보다 "바로 위 행과 비슷한 값(±1, ±2)"을 고르는 경우가 많다
+// (예: 24 다음은 23/25/26인 경우가 흔함) — 목록 맨 위에 이전 값 주변 몇 개를 클러스터로
+// 끼워 넣어, 6~200cm 전체를 스크롤하지 않고도 인접 값을 바로 탭할 수 있게 한다.
+function setDbhShortcutCluster(selectEl, centerValue) {
+  if (!selectEl || selectEl.value !== '') return; // 대상에 이미 값이 있으면 아무 것도 안 함 — 확정된 선택 보호
+  selectEl.querySelectorAll('option[data-shortcut="true"]').forEach(o => o.remove());
+  const center = Number(centerValue);
+  if (!centerValue || !Number.isFinite(center)) return;
+  const anchor = selectEl.options[1] || null; // 정식 목록의 첫 옵션(6cm) — 이 앞에 순서대로 끼워 넣는다
+  [-2, -1, 0, 1, 2].forEach(off => {
+    const v = center + off;
+    if (v < 6 || v > 200) return; // 드롭다운 범위(6~200cm) 밖은 제외
+    const opt = document.createElement('option');
+    opt.value = String(v);
+    opt.textContent = off === 0 ? '↑ ' + v + ' (위와 동일)' : String(v);
+    opt.dataset.shortcut = 'true';
+    selectEl.insertBefore(opt, anchor);
+  });
+}
+
 function syncNextRowShortcuts(i) {
   if (i >= TREE_TOTAL) return;
   const nextSpecies = document.getElementById('tr-species-' + (i + 1));
@@ -3939,24 +3959,23 @@ function syncNextRowShortcuts(i) {
 
   if (!species || !dbh) {
     setRowShortcut(nextSpecies, '');
-    setRowShortcut(nextDbh, '');
+    setDbhShortcutCluster(nextDbh, '');
     return;
   }
   setRowShortcut(nextSpecies, species);
-  setRowShortcut(nextDbh, dbh);
+  setDbhShortcutCluster(nextDbh, dbh);
 }
 
 // 단축 옵션을 선택하면 그 즉시 원래(정식) option으로 선택 상태를 옮긴다 — 값·화면 문구·후속 갱신을 항상 일관되게 유지.
+// 흉고직경은 단축 옵션이 여러 개(클러스터)일 수 있으므로 전부 정리한다.
 function commitShortcutSelection(selectEl) {
   if (!selectEl) return;
   const selected = selectEl.options[selectEl.selectedIndex];
-  const shortcut = selectEl.querySelector('option[data-shortcut="true"]');
-  if (shortcut && shortcut === selected) {
-    const value = shortcut.value;
-    shortcut.remove();
+  const isShortcutSelected = !!selected && selected.dataset.shortcut === 'true';
+  const value = isShortcutSelected ? selected.value : null;
+  selectEl.querySelectorAll('option[data-shortcut="true"]').forEach(o => o.remove());
+  if (isShortcutSelected) {
     selectEl.value = value; // 같은 값을 가진 원래(정식) option으로 선택 상태를 옮김
-  } else if (shortcut) {
-    shortcut.remove(); // 사용자가 원래 목록의 다른 값을 직접 선택한 경우 — 안 쓴 단축만 정리
   }
 }
 
