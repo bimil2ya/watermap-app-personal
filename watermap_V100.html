@@ -1973,6 +1973,19 @@ function toggleDarkMode() {
   localStorage.setItem('dark_mode', isDark ? '1' : '0');
 }
 
+// 최초 실행 시 1회만 책임 한계 고지 (localStorage에 확인 기록을 남겨 다시 안 뜨게 함)
+document.addEventListener('DOMContentLoaded', function() {
+  if (!localStorage.getItem('disclaimer_ack')) {
+    alert(
+      '이 앱은 개인이 원본 앱을 개인적으로 수정해 만든 개인 포크입니다.\n\n' +
+      '사용 또는 오사용으로 인해 발생하는 어떠한 손해(현장 조사 데이터 유실 등을 포함)에 ' +
+      '대해서도 저작권자는 책임지지 않습니다.\n\n' +
+      '신중하게 판단하여 사용해주세요.'
+    );
+    localStorage.setItem('disclaimer_ack', String(Date.now()));
+  }
+});
+
 // 다크모드 초기화 (저장된 설정 복원)
 document.addEventListener('DOMContentLoaded', function() {
   if (localStorage.getItem('dark_mode') === '1') {
