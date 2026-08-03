@@ -158,8 +158,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .number-picker-header { padding: 14px 16px; border-bottom: 1px solid var(--gray-border); display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 15px; color: var(--text); }
 .number-picker-close { background: none; border: none; font-size: 15px; color: var(--green-dark); font-weight: 700; cursor: pointer; padding: 4px 8px; }
 .number-picker-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 6px 0; -webkit-overflow-scrolling: touch; }
-.number-picker-item { padding: 12px 16px; font-size: 17px; color: var(--text); text-align: center; cursor: pointer; }
+.number-picker-item { display: block; width: 100%; padding: 12px 16px; border: none; background: transparent; font-family: inherit; font-size: 17px; color: var(--text); text-align: center; cursor: pointer; }
 .number-picker-item:active { background: var(--gray-bg); }
+.number-picker-item:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+.number-picker-item[aria-pressed="true"] { background: var(--green-light); color: var(--green-dark); font-weight: 700; }
+.number-picker-item.number-picker-clear { color: var(--text-sub); font-weight: 600; border-bottom: 1px solid var(--gray-border); }
 .tree-picker-trigger { width: 100%; padding: 7px 2px; border: none; background: transparent; font-size: 15px; color: var(--text-sub); outline: none; text-align: center; font-weight: 500; cursor: pointer; }
 .tree-picker-trigger.filled { color: var(--text); font-weight: 700; }
 .tree-picker-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -1578,7 +1581,7 @@ function json(obj) {
 </div>
 
 <!-- 사진 액션 바텀시트 -->
-<div id="photo-action-sheet" style="display:none;position:fixed;inset:0;z-index:9999;">
+<div id="photo-action-sheet" style="display:none;position:fixed;inset:0;z-index:9999;" aria-busy="false">
   <div onclick="closePhotoSheet()" style="position:absolute;inset:0;background:rgba(0,0,0,0.5);"></div>
   <div style="position:absolute;bottom:0;left:0;right:0;background:var(--white);border-radius:16px 16px 0 0;padding:12px 16px 32px;">
     <div style="width:40px;height:4px;background:var(--gray-border);border-radius:2px;margin:0 auto 14px;"></div>
@@ -1589,7 +1592,7 @@ function json(obj) {
       style="width:100%;padding:15px;background:#FDECEA;color:var(--danger);border:none;border-radius:var(--radius-sm);font-size:17px;font-weight:700;cursor:pointer;margin-bottom:10px;"></button>
     <button id="photo-sheet-btn3" onclick="photoSheetAction3()"
       style="width:100%;padding:15px;background:#EEF2FF;color:#3730A3;border:none;border-radius:var(--radius-sm);font-size:17px;font-weight:700;cursor:pointer;margin-bottom:10px;display:none;">🔍 이미지 보기</button>
-    <button onclick="closePhotoSheet()"
+    <button id="photo-sheet-cancel" onclick="closePhotoSheet()"
       style="width:100%;padding:15px;background:var(--gray-bg);color:var(--text-sub);border:none;border-radius:var(--radius-sm);font-size:17px;font-weight:600;cursor:pointer;">
       취소
     </button>
@@ -1619,6 +1622,24 @@ let photoData = {};
 let deletedPhotoFilenames = new Set(); // 현재 편집 세션에서 UI로 명시적으로 삭제한 사진 filename — photoList 병합 시 되살리기 방지용
 let photoSlotsManuallyModified = new Set(); // 삭제되거나 재촬영된 적 있는 슬롯 idx — 저장 성공에도 유지, 새로고침 시엔 초기화됨(의도된 제약)
 let _photoEditSession = 0; // _doReset() 호출마다 증가 — 그 이전에 시작된 비동기 촬영 처리 결과를 무효화
+
+// ====== 공용 배경 스크롤 잠금 ======
+// 사진 액션시트·사진 뷰어·숫자 선택 시트가 각자 body.overflow를 직접 건드리면,
+// 하나가 닫히며 ''로 되돌릴 때 다른 게 열려 있어도 잠금이 풀릴 수 있다.
+// 소유자 이름(owner)을 Set으로 관리해, 열린 오버레이가 하나도 없을 때만 실제로 해제한다.
+const _bodyScrollLocks = new Set();
+let _bodyScrollOverflowBeforeLock = null;
+function lockBodyScroll(owner) {
+  if (_bodyScrollLocks.size === 0) _bodyScrollOverflowBeforeLock = document.body.style.overflow;
+  _bodyScrollLocks.add(owner);
+  document.body.style.overflow = 'hidden';
+}
+function unlockBodyScroll(owner) {
+  _bodyScrollLocks.delete(owner);
+  if (_bodyScrollLocks.size === 0) {
+    document.body.style.overflow = _bodyScrollOverflowBeforeLock || '';
+  }
+}
 
 // 사진촬영 탭 자동 진행 순서 — 전토심(9)·토양단면(10)은 사전 준비가 필요해 제외, 서_4M_울폐도(8) 다음은 지표면(11)으로 건너뜀
 const PHOTO_AUTO_CHAIN = [0,1,2,3,4,5,6,7,8,11];
@@ -2464,19 +2485,56 @@ function syncPickerTrigger(selectId) {
 function syncAllPickerTriggers() {
   Object.keys(_pickerTriggers).forEach(syncPickerTrigger);
 }
+let _numberPickerOpenerEl = null; // 열기 전 포커스가 있던 엘리먼트 — 닫을 때 복귀용
+
+// 목록 안에서 tabindex="0"을 가질 항목을 하나로 유지한다(roving tabindex) — 항목이
+// 최대 100개(수고 0.5~50.0)라 전부 Tab 대상이 되면 키보드 사용자에게 부담이 크다.
+function _numberPickerSetRoving(el, { focus = true } = {}) {
+  const list = document.getElementById('number-picker-list');
+  Array.from(list.children).forEach(c => { c.tabIndex = -1; });
+  if (el) {
+    el.tabIndex = 0;
+    if (focus) el.focus();
+  }
+}
+
 function openNumberPicker(selectId, label, min, max, step, decimals, target) {
   const sel = document.getElementById(selectId);
   if (!sel || sel.disabled) return;
+  _numberPickerOpenerEl = document.activeElement;
   const list = document.getElementById('number-picker-list');
   list.innerHTML = '';
   document.getElementById('number-picker-label').textContent = label;
+
+  // 선택 해제 — 탭하면 빈 값으로 확정되어 다른 항목과 동일하게 change 이벤트가 발생한다.
+  // 값이 비어 있는 게 "현재 상태"여도, 열릴 때 스크롤·roving 포커스 시작점은 이 항목이 아니라
+  // 목표값 항목이어야 한다(맨 위에 있어 여기 포커스를 주면 브라우저가 목록을 위로 되돌린다).
+  const clearItem = document.createElement('button');
+  clearItem.type = 'button';
+  clearItem.className = 'number-picker-item number-picker-clear';
+  clearItem.textContent = '선택 해제';
+  clearItem.setAttribute('aria-pressed', sel.value ? 'false' : 'true');
+  clearItem.tabIndex = -1;
+  clearItem.addEventListener('click', () => {
+    sel.value = '';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    closeNumberPicker();
+  });
+  list.appendChild(clearItem);
+
   let targetEl = null;
-  const targetStr = decimals ? Number(target).toFixed(decimals) : String(Math.round(target));
+  const currentVal = sel.value;
+  // 이미 값이 있으면 그 값 근처로, 없으면 기본 목표값 근처로 스크롤한다 — 값을 미리 채우는 게
+  // 아니라 스크롤 위치만 정하는 것이라 "탭해야만 값이 들어간다"는 원칙과 무관하다.
+  const targetStr = currentVal || (decimals ? Number(target).toFixed(decimals) : String(Math.round(target)));
   for (let v = min; v <= max + 1e-9; v += step) {
     const val = decimals ? v.toFixed(decimals) : String(Math.round(v));
-    const item = document.createElement('div');
+    const item = document.createElement('button');
+    item.type = 'button';
     item.className = 'number-picker-item';
     item.textContent = val;
+    item.tabIndex = -1;
+    item.setAttribute('aria-pressed', val === currentVal ? 'true' : 'false');
     item.addEventListener('click', () => {
       sel.value = val;
       sel.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2485,17 +2543,74 @@ function openNumberPicker(selectId, label, min, max, step, decimals, target) {
     list.appendChild(item);
     if (val === targetStr) targetEl = item;
   }
+
   document.getElementById('number-picker-backdrop').style.display = 'flex';
+  lockBodyScroll('number-picker');
   // display 변경 직후 offsetTop/clientHeight를 읽으면 브라우저가 그 자리에서 강제로 레이아웃을
   // 계산해주므로(동기 리플로우), requestAnimationFrame 없이 바로 정확한 위치를 구할 수 있다
   // (rAF는 백그라운드 탭·자동화 환경 등에서 아예 안 불릴 수 있어 대신 이 방식을 쓴다).
   if (targetEl) {
     list.scrollTop = targetEl.offsetTop - list.clientHeight / 2 + targetEl.offsetHeight / 2;
   }
+  // roving 시작 위치만 목표 항목으로 맞춰두고(focus:false), 실제 초기 포커스는 닫기 버튼에 준다
+  // — 시트가 열리자마자 목록 어딘가로 포커스가 튀는 것보다 예측 가능하다.
+  _numberPickerSetRoving(targetEl || list.children[1] || clearItem, { focus: false });
+  document.getElementById('number-picker-close').focus();
 }
-function closeNumberPicker() {
-  document.getElementById('number-picker-backdrop').style.display = 'none';
+
+// restoreFocus:false는 _doReset()처럼 전체 초기화로 강제로 닫을 때 쓴다 — 초기화 버튼을
+// 누른 뒤 예전 숫자 트리거로 포커스가 돌아가면 어색하므로 이때는 포커스를 건드리지 않는다.
+function closeNumberPicker({ restoreFocus = true } = {}) {
+  const backdrop = document.getElementById('number-picker-backdrop');
+  if (backdrop.style.display === 'none') return;
+  backdrop.style.display = 'none';
+  unlockBodyScroll('number-picker');
+  const opener = _numberPickerOpenerEl;
+  _numberPickerOpenerEl = null;
+  if (restoreFocus && opener && opener.isConnected) opener.focus();
 }
+
+// Esc/화살표/Tab을 전역 리스너 하나로 처리 — 열 때마다 리스너를 추가/제거하지 않고
+// backdrop이 실제로 열려 있을 때만 개입해 중복 등록·다른 팝업과의 충돌을 피한다.
+document.addEventListener('keydown', (e) => {
+  const backdrop = document.getElementById('number-picker-backdrop');
+  if (!backdrop || backdrop.style.display === 'none') return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeNumberPicker(); // 값 변경 없이 닫기만 한다
+    return;
+  }
+  const list = document.getElementById('number-picker-list');
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const items = Array.from(list.children);
+    const activeIdx = items.indexOf(document.activeElement);
+    if (activeIdx === -1) return;
+    const nextIdx = e.key === 'ArrowDown'
+      ? Math.min(items.length - 1, activeIdx + 1)
+      : Math.max(0, activeIdx - 1);
+    const nextEl = items[nextIdx];
+    _numberPickerSetRoving(nextEl);
+    nextEl.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  if (e.key === 'Tab') {
+    // roving tabindex로 목록 안 탭 대상이 항상 1개뿐이라, 시트 안 포커스 가능 요소는
+    // "닫기 버튼"과 "현재 roving 항목" 둘뿐이다 — 이 둘 사이에서만 순환시켜 aria-modal의
+    // 의미(포커스가 배경으로 새지 않음)를 지킨다.
+    const closeBtn = document.getElementById('number-picker-close');
+    const activeItem = list.querySelector('[tabindex="0"]');
+    const focusables = [closeBtn, activeItem].filter(Boolean);
+    const idx = focusables.indexOf(document.activeElement);
+    if (idx === -1) return; // 포커스가 시트 밖에 있으면 개입하지 않음
+    e.preventDefault();
+    const nextIdx = e.shiftKey
+      ? (idx - 1 + focusables.length) % focusables.length
+      : (idx + 1) % focusables.length;
+    focusables[nextIdx].focus();
+  }
+  // Enter/Space는 button 기본 동작(click)이 그대로 값 확정을 수행하므로 별도 처리 불필요
+});
 
 function setTodayDate() {
   const now   = new Date();
@@ -4266,7 +4381,8 @@ function buildTreeTable() {
       syncPickerTrigger('tr-height-' + i);
 
       // 수고 3개 초과 방지 — 이미 3개 입력됐으면 나머지 비활성화
-      const TREE_TOTAL = document.querySelectorAll('[id^="tr-height-"]').length;
+      // (전역 TREE_TOTAL=50 그대로 사용 — 지역 변수로 다시 세면 select+trigger 버튼이
+      // 둘 다 'tr-height-'로 시작해 100으로 잘못 세어진다)
       let heightCount = 0;
       for (let j = 1; j <= TREE_TOTAL; j++) {
         const v = document.getElementById('tr-height-' + j)?.value || '';
@@ -4390,9 +4506,32 @@ function updatePhotoNames() {
 
 // ====== 사진 액션 바텀시트 ======
 let _sheetState = null; // { type: 'photo'|'move', idx, state: 'empty'|'filled' }
+let _photoSheetLoading = false; // photoSheetAction3()가 IDB 조회 중일 때만 true — 로딩 중엔 시트를 유지하고 닫기 경로를 막는다
+let _photoViewRequestVersion = 0; // 새 시트가 열리거나 강제로 닫힐 때마다 증가 — 뒤늦게 끝난 이미지 조회 결과를 무효화하는 데 쓴다
+
+// 진행 중인 "이미지 보기" 요청을 무효화 + 로딩 UI를 원상복구. 새 시트를 열 때(openPhotoSheet)와
+// 강제 닫기(closePhotoSheet({force:true}), 예: _doReset())에서만 호출한다 — 정상 성공/실패 종료
+// 경로는 이 요청 자신을 무효화할 이유가 없으므로 절대 호출하면 안 된다.
+function invalidatePhotoViewRequest() {
+  _photoViewRequestVersion++;
+  setPhotoSheetLoading(false);
+}
+
+function setPhotoSheetLoading(loading) {
+  _photoSheetLoading = loading;
+  ['photo-sheet-btn1', 'photo-sheet-btn2', 'photo-sheet-btn3', 'photo-sheet-cancel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = loading;
+  });
+  const btn3 = document.getElementById('photo-sheet-btn3');
+  if (btn3) btn3.textContent = loading ? '불러오는 중…' : '🔍 이미지 보기';
+  const sheet = document.getElementById('photo-action-sheet');
+  if (sheet) sheet.setAttribute('aria-busy', loading ? 'true' : 'false');
+}
 
 function openPhotoSheet(state, type, idx, slotName) {
   cancelAutoAdvance();
+  invalidatePhotoViewRequest(); // 새 시트는 항상 깨끗한 비로딩 상태로 시작 — 이전 시트의 이미지 조회는 무효화
   _sheetState = { state, type, idx };
   const label  = document.getElementById('photo-sheet-label');
   const btn1   = document.getElementById('photo-sheet-btn1');
@@ -4420,57 +4559,81 @@ function openPhotoSheet(state, type, idx, slotName) {
   }
 
   document.getElementById('photo-action-sheet').style.display = 'block';
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll('photo-sheet');
 }
 
-function closePhotoSheet() {
+// force:true는 로딩 중이어도 무조건 닫는다(_doReset() 등 전체 초기화 전용) — 이때는 진행 중인
+// 이미지 조회도 함께 무효화해야 나중에 응답이 와도 엉뚱한 화면 위에 뷰어가 뜨지 않는다.
+// 일반 닫기(성공/실패 종료, 배경 탭, 취소 버튼)는 force 없이 호출하며, 이 경우 로딩 중이면
+// 아무 것도 하지 않고 무시한다(배경 탭·취소로 로딩을 끊을 수 없게 하기 위함).
+function closePhotoSheet({ force = false } = {}) {
+  if (_photoSheetLoading && !force) return;
+  if (force) invalidatePhotoViewRequest();
   document.getElementById('photo-action-sheet').style.display = 'none';
-  document.body.style.overflow = '';
+  unlockBodyScroll('photo-sheet');
   _sheetState = null;
 }
 
 async function photoSheetAction3() {
-  if (!_sheetState) return;
+  if (!_sheetState || _photoSheetLoading) return;
   const { type, idx } = _sheetState;
-  closePhotoSheet();
-  const plotNoForView = document.getElementById('soil-plot-no')?.value || '';
-  let stored = null;
-  if (plotNoForView) {
-    // 뷰어용 키(400×300 q0.65) 우선 조회
-    stored = type === 'photo'
-      ? await idbGet(idbViewKey(plotNoForView, idx))
-      : await idbGet(idbMoveViewKey(plotNoForView, idx));
-    // fallback: 슬롯 썸네일 키
-    if (!stored || !stored.base64) {
+  const myVersion = ++_photoViewRequestVersion;
+  setPhotoSheetLoading(true); // 로딩 중엔 시트를 유지 — 배경 탭·취소는 closePhotoSheet()의 가드가 막는다
+  try {
+    const plotNoForView = document.getElementById('soil-plot-no')?.value || '';
+    let stored = null;
+    if (plotNoForView) {
+      // 뷰어용 키(400×300 q0.65) 우선 조회
       stored = type === 'photo'
-        ? await idbGet(idbThumbKey(plotNoForView, idx))
-        : await idbGet(idbMoveThumbKey(plotNoForView, idx));
+        ? await idbGet(idbViewKey(plotNoForView, idx))
+        : await idbGet(idbMoveViewKey(plotNoForView, idx));
+      // fallback: 슬롯 썸네일 키
+      if (!stored || !stored.base64) {
+        stored = type === 'photo'
+          ? await idbGet(idbThumbKey(plotNoForView, idx))
+          : await idbGet(idbMoveThumbKey(plotNoForView, idx));
+      }
     }
-  }
-  // fallback: 원본 키 (현재 작업 조사지)
-  if (!stored || !stored.base64) {
-    const key = type === 'photo' ? 'photo_' + idx : 'move_photo_' + idx;
-    stored = await idbGet(key);
-  }
-  if (!stored || !stored.base64) {
+    // fallback: 원본 키 (현재 작업 조사지)
+    if (!stored || !stored.base64) {
+      const key = type === 'photo' ? 'photo_' + idx : 'move_photo_' + idx;
+      stored = await idbGet(key);
+    }
+    // 조회하는 동안 강제 초기화나 다른 슬롯의 새 시트 열기로 이 요청이 무효화됐으면,
+    // 화면·잠금·버튼 상태를 전혀 건드리지 않고 조용히 끝낸다.
+    if (myVersion !== _photoViewRequestVersion) return;
+    if (!stored || !stored.base64) {
+      setPhotoSheetLoading(false);
+      closePhotoSheet();
+      showToast('사진 데이터를 불러올 수 없습니다', 'error');
+      return;
+    }
+    const SLOTS = ['C_울폐도','N_8M','N_4M_울폐도','E_8M','E_4M_울폐도','S_8M','S_4M_울폐도','W_8M','W_4M_울폐도','전토심','토양단면','지표면'];
+    const MOVE  = ['N_기존현황','E_기존현황','S_기존현황','W_기존현황'];
+    const label = type === 'photo' ? SLOTS[idx] : MOVE[idx];
+    const viewer = document.getElementById('photo-viewer');
+    document.getElementById('photo-viewer-img').src = 'data:image/jpeg;base64,' + stored.base64;
+    document.getElementById('photo-viewer-label').textContent = label;
+    // setPhotoSheetLoading(false)가 먼저 실행돼야 아래 closePhotoSheet()(force 없음)의
+    // "로딩 중이면 무시" 가드에 걸리지 않는다 — 이 순서를 바꾸면 시트가 안 닫힌다.
+    setPhotoSheetLoading(false);
+    lockBodyScroll('photo-viewer'); // 새 잠금을 먼저 걸고
+    closePhotoSheet();              // 기존 잠금은 그 다음 해제(Set이 비는 순간이 없도록)
+    viewer.style.display = 'flex';
+  } catch (err) {
+    if (myVersion !== _photoViewRequestVersion) return;
+    setPhotoSheetLoading(false);
+    closePhotoSheet();
+    console.error(err);
     showToast('사진 데이터를 불러올 수 없습니다', 'error');
-    return;
   }
-  const SLOTS = ['C_울폐도','N_8M','N_4M_울폐도','E_8M','E_4M_울폐도','S_8M','S_4M_울폐도','W_8M','W_4M_울폐도','전토심','토양단면','지표면'];
-  const MOVE  = ['N_기존현황','E_기존현황','S_기존현황','W_기존현황'];
-  const label = type === 'photo' ? SLOTS[idx] : MOVE[idx];
-  const viewer = document.getElementById('photo-viewer');
-  document.getElementById('photo-viewer-img').src = 'data:image/jpeg;base64,' + stored.base64;
-  document.getElementById('photo-viewer-label').textContent = label;
-  viewer.style.display = 'flex';
-  document.body.style.overflow = 'hidden';
 }
 
 function closePhotoViewer() {
   const viewer = document.getElementById('photo-viewer');
   viewer.style.display = 'none';
   document.getElementById('photo-viewer-img').src = '';
-  document.body.style.overflow = '';
+  unlockBodyScroll('photo-viewer');
 }
 
 function photoSheetAction1() {
@@ -5705,6 +5868,12 @@ function getTreeRows() {
 function _doReset() {
   _photoEditSession++;
   cancelAutoAdvance();
+  // 전체 초기화 시 열려 있을 수 있는 오버레이(사진 액션시트/뷰어/숫자 선택 시트)를 전부 강제로
+  // 정리한다 — 안 닫으면 배경 스크롤 잠금이 새 화면 위에 그대로 남거나, 사진 시트가 로딩 중이던
+  // 이미지 조회 결과가 초기화 이후에 뒤늦게 뷰어를 열 수 있다(force가 그 요청도 함께 무효화한다).
+  closePhotoSheet({ force: true });
+  closePhotoViewer();
+  closeNumberPicker({ restoreFocus: false });
   // 설정탭 입력값 제외하고 초기화
   const KEEP_IDS = ['setting-script-url', 'setting-drive-folder', 'setting-team-code', 'setting-team-code-top'];
   const RESET_READONLY = ['soil-basin', 'soil-basin-code']; // readonly지만 초기화 필요한 항목
@@ -6424,10 +6593,10 @@ function showIOSGuide() {
 
 <!-- 커스텀 숫자 선택 시트 — soil-depth-b, tr-height-N 등에서 공용으로 사용 -->
 <div class="number-picker-backdrop" id="number-picker-backdrop" onclick="if(event.target===this) closeNumberPicker()">
-  <div class="number-picker-sheet">
+  <div class="number-picker-sheet" role="dialog" aria-modal="true" aria-labelledby="number-picker-label">
     <div class="number-picker-header">
       <span id="number-picker-label"></span>
-      <button type="button" class="number-picker-close" onclick="closeNumberPicker()">닫기</button>
+      <button type="button" class="number-picker-close" id="number-picker-close" onclick="closeNumberPicker()">닫기</button>
     </div>
     <div class="number-picker-list" id="number-picker-list"></div>
   </div>
