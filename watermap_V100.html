@@ -3545,19 +3545,18 @@ async function saveData() {
     document.querySelectorAll('.nav-btn')[1].classList.add('active');
     currentTab = 'tab-tree';
     showToast('⚠️ 수고는 정확히 3개 입력해야 합니다 (현재 ' + heightCount + '개)', 'error');
-    // 수고 미입력 행 강조 (입력된 행 중)
+    // 수고 미입력 행 강조 — 수고는 항상 상단 TREE_HEIGHT_LIMIT(3)행에만 입력 가능하므로
+    // 그 범위만 검사한다(그 아래 행은 애초에 입력이 막혀 있어 강조해도 의미가 없다).
     // 강조된 첫 항목은 CSS 선택자로 다시 찾지 않고 이 루프에서 직접 기억해둔다 — 브라우저가
     // style.background에 넣은 hex(#FFF0F0)를 rgb(255, 240, 240)으로 바꿔 저장해버려서
     // [style*="FFF0F0"] 같은 문자열 매칭 선택자로는 다시 찾을 수 없기 때문(실제로 확인된 버그).
-    let hlCount = 0;
     let firstHt = null;
-    for (let i = 1; i <= TREE_TOTAL && hlCount < 3; i++) {
-      const species = document.getElementById('tr-species-'+i)?.value || '';
-      const height  = document.getElementById('tr-height-'+i)?.value || '';
-      if (species && !height) {
+    for (let i = 1; i <= TREE_HEIGHT_LIMIT; i++) {
+      const height = document.getElementById('tr-height-'+i)?.value || '';
+      if (!height) {
         const htEl = document.getElementById('tr-height-'+i+'-trigger'); // 실제로 보이는 건 트리거 버튼 (select는 숨겨짐)
         if (htEl) {
-          htEl.style.background = '#FFF0F0'; htEl.style.outline = '1.5px solid #E24B4A'; hlCount++;
+          htEl.style.background = '#FFF0F0'; htEl.style.outline = '1.5px solid #E24B4A';
           if (!firstHt) firstHt = htEl;
         }
       }
@@ -4233,6 +4232,7 @@ function toggleVal(btn, fieldId, val) {
 // ====== 임목 표 생성 (50행 고정) ======
 const TREE_SPECIES = ['기타활엽수','기타참나무','신갈나무','굴참나무','졸참나무','상수리나무','소나무','리기다소나무','잣나무','일본잎갈나무','기타침엽수류','백합나무','자작나무','삼나무','편백','상록활엽수류','죽림'];
 const TREE_TOTAL = 50;
+const TREE_HEIGHT_LIMIT = 3; // 수고는 항상 상단 3행에만 입력 — 그 아래 행은 수종명/흉고직경만 기록
 
 // 흉고직경 드롭다운: 6cm ~ 200cm (정수 단위, 현장 측정 기준)
 function buildDbhOpts() {
@@ -4370,41 +4370,18 @@ function buildTreeTable() {
 
     // 수고 — 네이티브 select는 숨기고(값 저장·기존 로직 전부 그대로 유지), 커스텀 숫자 선택
     // 시트를 여는 버튼을 대신 보여준다. 값은 사용자가 시트에서 항목을 탭해야만 들어간다.
+    // 수고는 항상 상단 TREE_HEIGHT_LIMIT(3)행에만 입력하므로, 그 아래 행은 애초에 비활성화해서
+    // 입력 자체를 막는다(예전에는 아무 3행이나 채우면 나머지를 나중에 비활성화하는 방식이었다).
     const tdHt = document.createElement('td');
     tdHt.style.cssText = 'padding:1px 2px;';
     const selHt = document.createElement('select');
     selHt.id = 'tr-height-' + i;
     selHt.style.display = 'none';
     selHt.innerHTML = htOpts;
+    if (i > TREE_HEIGHT_LIMIT) selHt.disabled = true;
     selHt.addEventListener('change', () => {
       selHt.dataset.userSelected = 'true'; // 사용자가 직접 선택했음을 표시
       syncPickerTrigger('tr-height-' + i);
-
-      // 수고 3개 초과 방지 — 이미 3개 입력됐으면 나머지 비활성화
-      // (전역 TREE_TOTAL=50 그대로 사용 — 지역 변수로 다시 세면 select+trigger 버튼이
-      // 둘 다 'tr-height-'로 시작해 100으로 잘못 세어진다)
-      let heightCount = 0;
-      for (let j = 1; j <= TREE_TOTAL; j++) {
-        const v = document.getElementById('tr-height-' + j)?.value || '';
-        if (v) heightCount++;
-      }
-      if (heightCount >= 3) {
-        for (let j = 1; j <= TREE_TOTAL; j++) {
-          const el = document.getElementById('tr-height-' + j);
-          if (el && !el.value) {
-            el.disabled = true;
-            syncPickerTrigger('tr-height-' + j);
-          }
-        }
-      } else {
-        for (let j = 1; j <= TREE_TOTAL; j++) {
-          const el = document.getElementById('tr-height-' + j);
-          if (el && !el.value) {
-            el.disabled = false;
-            syncPickerTrigger('tr-height-' + j);
-          }
-        }
-      }
     });
     tdHt.appendChild(selHt);
     const htTrigger = document.createElement('button');
