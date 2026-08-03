@@ -110,7 +110,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .field select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 40px; }
 
 /* 미기입 필드 강조 */
-.field-error input, .field-error select, .field-error textarea {
+.field-error input, .field-error select, .field-error textarea, .field-error .picker-trigger {
   border-color: var(--danger) !important; border-width: 2.5px !important;
   background: #FFF0EE !important;
 }
@@ -145,6 +145,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .quick-pick-row { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
 .quick-pick-btn { flex: 1 1 auto; min-width: 40px; padding: 6px 5px; text-align: center; border: 1.5px solid var(--gray-border); border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600; cursor: pointer; background: var(--gray-bg); color: var(--text-sub); transition: all 0.15s; }
 .quick-pick-btn.selected { background: var(--green); border-color: var(--green-dark); color: #fff; font-weight: 700; }
+
+/* 커스텀 숫자 선택 시트 — 값을 미리 채우지 않고, 목록 화면 위치만 대략적인 값 근처로 스크롤해서
+   연다. 네이티브 select는 "선택된 값"과 "스크롤 위치"가 같은 것이라 분리할 수 없어서(포커스만
+   해도 값이 미리 채워지는 문제), 이 UI는 직접 그린 목록이라 스크롤 위치와 값 확정을 분리한다.
+   실제 값은 사용자가 목록에서 항목을 탭해야만 들어간다. */
+.picker-trigger { width: 100%; padding: 13px 14px; border: 2px solid var(--gray-border); border-radius: var(--radius-sm); background: var(--gray-bg); color: var(--text-sub); font-size: 16px; font-weight: 600; text-align: left; cursor: pointer; }
+.picker-trigger.filled { border-color: var(--green); background: var(--green-light); color: var(--green-dark); font-weight: 700; }
+.picker-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
+.number-picker-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 300; display: none; align-items: flex-end; justify-content: center; }
+.number-picker-sheet { width: 100%; max-width: 480px; max-height: 60vh; background: var(--white); border-radius: 16px 16px 0 0; display: flex; flex-direction: column; overflow: hidden; }
+.number-picker-header { padding: 14px 16px; border-bottom: 1px solid var(--gray-border); display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 15px; color: var(--text); }
+.number-picker-close { background: none; border: none; font-size: 15px; color: var(--green-dark); font-weight: 700; cursor: pointer; padding: 4px 8px; }
+.number-picker-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 6px 0; -webkit-overflow-scrolling: touch; }
+.number-picker-item { padding: 12px 16px; font-size: 17px; color: var(--text); text-align: center; cursor: pointer; }
+.number-picker-item:active { background: var(--gray-bg); }
+.tree-picker-trigger { width: 100%; padding: 7px 2px; border: none; background: transparent; font-size: 15px; color: var(--text-sub); outline: none; text-align: center; font-weight: 500; cursor: pointer; }
+.tree-picker-trigger.filled { color: var(--text); font-weight: 700; }
+.tree-picker-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* 사진 그리드 */
 .photo-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; }
@@ -648,7 +666,9 @@ body.dark-mode #tab-tree table td:first-child {
         </div>
         <div class="field">
           <label>B층 토심</label>
-          <select id="soil-depth-b" onchange="focusNext('soil-color-a-hue')" onfocus="scrollSelectTo(this,30)" onclick="scrollSelectTo(this,30)"><option value="">선택</option></select>
+          <select id="soil-depth-b" onchange="syncPickerTrigger('soil-depth-b'); focusNext('soil-color-a-hue')" style="display:none;"><option value="">선택</option></select>
+          <button type="button" class="picker-trigger" id="soil-depth-b-trigger"
+            onclick="openNumberPicker('soil-depth-b','B층 토심 선택',1,100,1,0,50)"></button>
         </div>
       </div>
 
@@ -1956,6 +1976,7 @@ async function restoreDraft(plotNo) {
     }
     console.log('draft 복원 완료');
     syncAllQuickPickHighlights();
+    syncAllPickerTriggers();
     return true;
   } catch(e) { console.warn('draft 복원 실패', e); return false; }
 }
@@ -2223,6 +2244,7 @@ function loadRecord(id) {
   toggleMovePhotoCard();
   syncToTree();
   syncAllQuickPickHighlights();
+  syncAllPickerTriggers();
 
   // 입지토양 탭으로 이동
   const soilBtn = document.querySelector('.nav-btn[onclick*="tab-soil"]');
@@ -2263,6 +2285,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ['soil-erosion', 'soil-deposit', 'soil-wind', 'soil-rock', 'soil-weathering',
    'soil-moist-a', 'soil-moist-b', 'soil-100cc-10', 'soil-100cc-30', 'soil-chem-10', 'soil-chem-30']
     .forEach(buildQuickPicker);
+  registerPickerTrigger('soil-depth-b', document.getElementById('soil-depth-b-trigger'));
   buildMunsellOptions();
   buildPhotoGrid();
   buildTreeTable();
@@ -2409,6 +2432,69 @@ function syncQuickPickHighlight(selectId) {
 // 직접 바꾸는 경로 끝에서 호출해, 버튼 강조가 실제 값과 어긋나지 않게 한다.
 function syncAllQuickPickHighlights() {
   Object.keys(_quickPickRows).forEach(syncQuickPickHighlight);
+}
+
+// ====== 커스텀 숫자 선택 시트 ======
+// 네이티브 select는 "선택된 값"과 "스크롤 위치"가 같은 것이라, 값을 안 채우고 스크롤 위치만
+// 미리 옮겨놓는 게 불가능하다(scrollSelectTo가 포커스만 해도 값을 채워버리는 문제의 원인).
+// 이 시트는 직접 그린 목록이라 스크롤 위치와 값 확정을 완전히 분리한다 — 열릴 때 목표값 근처로
+// 화면만 스크롤해두고, 실제 값은 사용자가 목록에서 항목을 탭해야만 들어간다.
+const _pickerTriggers = {}; // selectId -> trigger 버튼 엘리먼트
+function registerPickerTrigger(selectId, triggerEl) {
+  _pickerTriggers[selectId] = triggerEl;
+  syncPickerTrigger(selectId);
+}
+function syncPickerTrigger(selectId) {
+  const triggerEl = _pickerTriggers[selectId];
+  const sel = document.getElementById(selectId);
+  if (!triggerEl || !sel) return;
+  if (sel.value) {
+    triggerEl.textContent = sel.value;
+    triggerEl.classList.add('filled');
+    // 값이 채워지면 검증 실패로 걸려있던 빨간 강조(있었다면)를 해제
+    triggerEl.style.background = '';
+    triggerEl.style.outline = '';
+  } else {
+    triggerEl.textContent = '선택';
+    triggerEl.classList.remove('filled');
+  }
+  triggerEl.disabled = sel.disabled;
+}
+// draft 복원·레코드 불러오기·초기화처럼 change 이벤트 없이 select.value가 바뀌는 경로 끝에서 호출
+function syncAllPickerTriggers() {
+  Object.keys(_pickerTriggers).forEach(syncPickerTrigger);
+}
+function openNumberPicker(selectId, label, min, max, step, decimals, target) {
+  const sel = document.getElementById(selectId);
+  if (!sel || sel.disabled) return;
+  const list = document.getElementById('number-picker-list');
+  list.innerHTML = '';
+  document.getElementById('number-picker-label').textContent = label;
+  let targetEl = null;
+  const targetStr = decimals ? Number(target).toFixed(decimals) : String(Math.round(target));
+  for (let v = min; v <= max + 1e-9; v += step) {
+    const val = decimals ? v.toFixed(decimals) : String(Math.round(v));
+    const item = document.createElement('div');
+    item.className = 'number-picker-item';
+    item.textContent = val;
+    item.addEventListener('click', () => {
+      sel.value = val;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      closeNumberPicker();
+    });
+    list.appendChild(item);
+    if (val === targetStr) targetEl = item;
+  }
+  document.getElementById('number-picker-backdrop').style.display = 'flex';
+  // display 변경 직후 offsetTop/clientHeight를 읽으면 브라우저가 그 자리에서 강제로 레이아웃을
+  // 계산해주므로(동기 리플로우), requestAnimationFrame 없이 바로 정확한 위치를 구할 수 있다
+  // (rAF는 백그라운드 탭·자동화 환경 등에서 아예 안 불릴 수 있어 대신 이 방식을 쓴다).
+  if (targetEl) {
+    list.scrollTop = targetEl.offsetTop - list.clientHeight / 2 + targetEl.offsetHeight / 2;
+  }
+}
+function closeNumberPicker() {
+  document.getElementById('number-picker-backdrop').style.display = 'none';
 }
 
 function setTodayDate() {
@@ -3345,16 +3431,22 @@ async function saveData() {
     currentTab = 'tab-tree';
     showToast('⚠️ 수고는 정확히 3개 입력해야 합니다 (현재 ' + heightCount + '개)', 'error');
     // 수고 미입력 행 강조 (입력된 행 중)
+    // 강조된 첫 항목은 CSS 선택자로 다시 찾지 않고 이 루프에서 직접 기억해둔다 — 브라우저가
+    // style.background에 넣은 hex(#FFF0F0)를 rgb(255, 240, 240)으로 바꿔 저장해버려서
+    // [style*="FFF0F0"] 같은 문자열 매칭 선택자로는 다시 찾을 수 없기 때문(실제로 확인된 버그).
     let hlCount = 0;
+    let firstHt = null;
     for (let i = 1; i <= TREE_TOTAL && hlCount < 3; i++) {
       const species = document.getElementById('tr-species-'+i)?.value || '';
       const height  = document.getElementById('tr-height-'+i)?.value || '';
       if (species && !height) {
-        const htEl = document.getElementById('tr-height-'+i);
-        if (htEl) { htEl.style.background = '#FFF0F0'; htEl.style.outline = '1.5px solid #E24B4A'; hlCount++; }
+        const htEl = document.getElementById('tr-height-'+i+'-trigger'); // 실제로 보이는 건 트리거 버튼 (select는 숨겨짐)
+        if (htEl) {
+          htEl.style.background = '#FFF0F0'; htEl.style.outline = '1.5px solid #E24B4A'; hlCount++;
+          if (!firstHt) firstHt = htEl;
+        }
       }
     }
-    const firstHt = document.querySelector('[id^="tr-height-"][style*="FFF0F0"]');
     if (firstHt) firstHt.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
@@ -4161,17 +4253,17 @@ function buildTreeTable() {
     tdDbh.appendChild(selDbh);
     tr.appendChild(tdDbh);
 
-    // 수고 select
+    // 수고 — 네이티브 select는 숨기고(값 저장·기존 로직 전부 그대로 유지), 커스텀 숫자 선택
+    // 시트를 여는 버튼을 대신 보여준다. 값은 사용자가 시트에서 항목을 탭해야만 들어간다.
     const tdHt = document.createElement('td');
     tdHt.style.cssText = 'padding:1px 2px;';
     const selHt = document.createElement('select');
     selHt.id = 'tr-height-' + i;
-    selHt.style.cssText = selStyle;
+    selHt.style.display = 'none';
     selHt.innerHTML = htOpts;
     selHt.addEventListener('change', () => {
       selHt.dataset.userSelected = 'true'; // 사용자가 직접 선택했음을 표시
-      selHt.style.background = 'transparent';
-      selHt.style.outline = '';
+      syncPickerTrigger('tr-height-' + i);
 
       // 수고 3개 초과 방지 — 이미 3개 입력됐으면 나머지 비활성화
       const TREE_TOTAL = document.querySelectorAll('[id^="tr-height-"]').length;
@@ -4185,8 +4277,7 @@ function buildTreeTable() {
           const el = document.getElementById('tr-height-' + j);
           if (el && !el.value) {
             el.disabled = true;
-            el.style.opacity = '0.4';
-            el.style.cursor = 'not-allowed';
+            syncPickerTrigger('tr-height-' + j);
           }
         }
       } else {
@@ -4194,15 +4285,23 @@ function buildTreeTable() {
           const el = document.getElementById('tr-height-' + j);
           if (el && !el.value) {
             el.disabled = false;
-            el.style.opacity = '';
-            el.style.cursor = '';
+            syncPickerTrigger('tr-height-' + j);
           }
         }
       }
     });
-    selHt.addEventListener('focus', () => scrollSelectTo(selHt, '10.0'));
-    selHt.addEventListener('click', () => scrollSelectTo(selHt, '10.0'));
     tdHt.appendChild(selHt);
+    const htTrigger = document.createElement('button');
+    htTrigger.type = 'button';
+    htTrigger.className = 'tree-picker-trigger';
+    htTrigger.id = 'tr-height-' + i + '-trigger';
+    htTrigger.addEventListener('click', () => {
+      const speciesVal = document.getElementById('tr-species-' + i)?.value || '';
+      const target = speciesVal === '기타활엽수' ? 8 : 14;
+      openNumberPicker('tr-height-' + i, i + '행 수고 선택', 0.5, 50, 0.5, 1, target);
+    });
+    tdHt.appendChild(htTrigger);
+    registerPickerTrigger('tr-height-' + i, htTrigger);
     tr.appendChild(tdHt);
 
     tbody.appendChild(tr);
@@ -5408,6 +5507,7 @@ function _restoreRecordData(rec) {
     }));
   }
   syncAllQuickPickHighlights();
+  syncAllPickerTriggers();
 }
 
 function saveDefaultSettings() {
@@ -5655,6 +5755,7 @@ function _doReset() {
     plotDisplayReset.style.fontWeight = '';
   }
   syncAllQuickPickHighlights();
+  syncAllPickerTriggers();
 }
 
 // 초기화 버튼용 (confirm 팝업 있음)
@@ -6320,6 +6421,17 @@ function showIOSGuide() {
   );
 }
 </script>
+
+<!-- 커스텀 숫자 선택 시트 — soil-depth-b, tr-height-N 등에서 공용으로 사용 -->
+<div class="number-picker-backdrop" id="number-picker-backdrop" onclick="if(event.target===this) closeNumberPicker()">
+  <div class="number-picker-sheet">
+    <div class="number-picker-header">
+      <span id="number-picker-label"></span>
+      <button type="button" class="number-picker-close" onclick="closeNumberPicker()">닫기</button>
+    </div>
+    <div class="number-picker-list" id="number-picker-list"></div>
+  </div>
+</div>
 
 </body>
 </html>
