@@ -3726,8 +3726,10 @@ function handleMovePhoto(event, i) {
   const filename = plotNo + '(' + MOVE_PHOTO_SLOTS[i] + ').jpg';
 
   _photoProcessing = true;
-  // 안전장치: 5초 후 강제 해제
-  const _safetyTimerM = setTimeout(() => { _photoProcessing = false; }, 5000);
+  // 안전장치: 20초 후 강제 해제 — 정상적인 압축+IDB 저장+썸네일 생성은 이보다 훨씬 빨리 끝나므로
+  // (느린 기기에서도) 정상 처리 중에 이 타이머가 먼저 풀어버리는 경합을 방지하고, 진짜로 멈춘
+  // 경우에만 최후의 수단으로 동작하게 한다. 정상 종료 시에는 각 종료 지점에서 clearTimeout으로 먼저 정리됨.
+  const _safetyTimerM = setTimeout(() => { _photoProcessing = false; }, 20000);
 
   // blobURL 방식: 메모리 효율적
   const blobUrl = URL.createObjectURL(file);
@@ -4481,7 +4483,10 @@ function handlePhoto(event, idx, fromCamera) {
   }
 
   _photoProcessing = true;
-  const _safetyTimer = setTimeout(() => { _photoProcessing = false; }, 5000);
+  // 안전장치: 20초 후 강제 해제 — 정상적인 압축+IDB 저장+썸네일 생성은 이보다 훨씬 빨리 끝나므로
+  // (느린 기기에서도) 정상 처리 중에 이 타이머가 먼저 풀어버리는 경합을 방지하고, 진짜로 멈춘
+  // 경우에만 최후의 수단으로 동작하게 한다. 정상 종료 시에는 각 종료 지점에서 clearTimeout으로 먼저 정리됨.
+  const _safetyTimer = setTimeout(() => { _photoProcessing = false; }, 20000);
 
 
   const plotNo = document.getElementById('soil-plot-no').value || 'NOPLOT';
@@ -5051,11 +5056,13 @@ function onPlotSelect(val) {
   // 현재 작업 중인 draft를 현재 조사지번호로 저장 (번호 변경 전)
   saveDraft();
 
-  // 다른 조사지번호 선택 시 photo_N IDB 클리어 (이전 조사 사진 섞임 방지)
+  // 다른 조사지번호 선택 시, 지금 떠나는 plotNo가 실제로 쓰던 슬롯의 보조 캐시만 정리한다
+  // (이전 조사 사진 섞임 방지). photo_N/move_photo_N은 plotNo와 무관한 전역 키라, 12+4슬롯을
+  // 전부 지우면 다른 미전송 기록이 fallback으로 의존하던 캐시까지 함께 사라질 수 있어 범위를 좁힘.
   const currentPlotNo = document.getElementById('soil-plot-no')?.value || '';
   if (val && val !== currentPlotNo) {
-    for (let i = 0; i < 12; i++) idbDelete('photo_' + i).catch(() => {});
-    for (let i = 0; i < 4; i++) idbDelete('move_photo_' + i).catch(() => {});
+    Object.keys(photoData).forEach(idx => idbDelete('photo_' + idx).catch(() => {}));
+    Object.keys(movePhotoData).forEach(idx => idbDelete('move_photo_' + idx).catch(() => {}));
   }
 
   // 전체 초기화
