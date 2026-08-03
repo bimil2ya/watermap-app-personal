@@ -1977,10 +1977,12 @@ function toggleDarkMode() {
 document.addEventListener('DOMContentLoaded', function() {
   if (!localStorage.getItem('disclaimer_ack')) {
     alert(
-      '이 앱은 개인이 원본 앱을 개인적으로 수정해 만든 개인 포크입니다.\n\n' +
+      '이 앱은 회사(관리자)에서 제공하는 원본 앱을 개인적으로 일부 수정한 개인 포크입니다.\n\n' +
+      '가능하면 회사에서 제공하는 원본 앱을 사용하시길 권장합니다. 이 앱은 개인 취향에 맞춰 ' +
+      '일부를 바꾼 것이라 오작동의 염려가 있습니다.\n\n' +
       '사용 또는 오사용으로 인해 발생하는 어떠한 손해(현장 조사 데이터 유실 등을 포함)에 ' +
       '대해서도 저작권자는 책임지지 않습니다.\n\n' +
-      '신중하게 판단하여 사용해주세요.'
+      '아주 신중하게 판단하여 사용해주세요.'
     );
     localStorage.setItem('disclaimer_ack', String(Date.now()));
   }
