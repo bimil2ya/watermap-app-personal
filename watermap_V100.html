@@ -3742,6 +3742,8 @@ function handleMovePhoto(event, i) {
 
   const plotNo = document.getElementById('soil-plot-no')?.value || 'NOPLOT';
   const filename = plotNo + '(' + MOVE_PHOTO_SLOTS[i] + ').jpg';
+  const mySession = _photoEditSession; // handlePhoto와 동일 — 처리 중 초기화/조사지 전환이 일어나면
+                                        // 이 캡처 결과를 화면·movePhotoData에 반영하지 않기 위함
 
   _photoProcessing = true;
   // 안전장치: 20초 후 강제 해제 — 정상적인 압축+IDB 저장+썸네일 생성은 이보다 훨씬 빨리 끝나므로
@@ -3782,6 +3784,14 @@ function handleMovePhoto(event, i) {
         clearTimeout(_safetyTimerM);
         _photoProcessing = false;
         showToast('사진 저장 실패 — 다시 촬영해주세요.', 'error');
+        return;
+      }
+      if (mySession !== _photoEditSession) {
+        // 그 사이 초기화(새로 시작·조사지 전환)가 일어남 — 이 결과는 무효. 화면·movePhotoData에
+        // 반영하지 않고, 방금 쓴 원본도 정리한다(handlePhoto와 동일한 원칙)
+        await idbDelete(idbMoveOrigKey(plotNo, i)).catch(console.warn);
+        clearTimeout(_safetyTimerM);
+        _photoProcessing = false;
         return;
       }
       idbSet('move_photo_' + i, { base64: base64m, filename, captureId }).catch(err => console.warn('보조 캐시 저장 실패', err));
