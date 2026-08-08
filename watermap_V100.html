@@ -3142,9 +3142,12 @@ let uploadInterruptedByHidden = false;
 document.addEventListener('visibilitychange', () => {
   // isNetworkUploadActive만 본다 — saveData()의 로컬 저장(ZIP 백업 등)은 네트워크 전송이 아니므로
   // 그동안 화면이 꺼져도 이 플래그와 무관해야 한다(_isUploading은 saveData 중에도 true가 됨).
+  // saveDraft()는 여기서 부르지 않는다 — hidden이 될 때마다 항상 실행되는 공용 리스너(위쪽,
+  // "포그라운드 복귀 시 완료 목록 자동 갱신" 근처)가 이미 호출하므로, 여기서 또 부르면 화면이
+  // 막 꺼지려는 촉박한 시점에 무거운 폼 전체 직렬화(querySelectorAll+JSON.stringify)가 불필요하게
+  // 두 번 실행된다.
   if (document.visibilityState === 'hidden' && isNetworkUploadActive) {
     uploadInterruptedByHidden = true;
-    saveDraft();
   }
 });
 function shouldContinueUpload() { return !uploadInterruptedByHidden; }
