@@ -3176,14 +3176,7 @@ async function autoRetryUpload() {
   });
   if (incomplete.length === 0) return;
 
-  beginNetworkUploadAttempt();
   const saveBtn = document.getElementById('save-btn');
-  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '업로드 중...'; }
-  document.querySelectorAll('[id^="reupload-btn-"]').forEach(btn => {
-    btn.disabled = true; btn.textContent = '업로드 중...';
-  });
-  showToast('📤 미완료 업로드 ' + incomplete.length + '건 자동 처리 중...', 'info'); // 진행 상태 토스트 — 최종 결과 토스트와 별개
-
   let successCount = 0;
   let failedCount = 0;
   let failedPhotoCount = 0;
@@ -3194,6 +3187,15 @@ async function autoRetryUpload() {
   const warnings = [];
 
   try {
+    // beginNetworkUploadAttempt() 이후의 모든 코드를 try 안으로 — 버튼 비활성화·진행 토스트
+    // 자체가 예외를 던져도 finally가 반드시 실행되어 플래그가 영구히 안 남게 하기 위함.
+    beginNetworkUploadAttempt();
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '업로드 중...'; }
+    document.querySelectorAll('[id^="reupload-btn-"]').forEach(btn => {
+      btn.disabled = true; btn.textContent = '업로드 중...';
+    });
+    showToast('📤 미완료 업로드 ' + incomplete.length + '건 자동 처리 중...', 'info'); // 진행 상태 토스트 — 최종 결과 토스트와 별개
+
     for (const rec of incomplete) {
     if (!shouldContinueUpload()) { interrupted = true; break; }
     let recordFailed = false;
@@ -3346,29 +3348,39 @@ async function autoRetryUpload() {
       outcome = { text: '❌ 자동 업로드 실패 — 저장목록에서 재업로드 버튼으로 다시 시도해주세요', type: 'error' };
     }
 
-    // 방금 완료된 레코드의 사진 슬롯만 정리 — fire-and-forget(비동기 완료를 기다리지 않음)이라
-    // 이 코드 자체가 실패할 일은 없다(개별 idbDelete 실패는 콘솔 경고만 남기고 결과에는 반영하지 않음 —
-    // 캐시 정리는 전송 결과와 무관한 최적화이므로).
+    // 방금 완료된 레코드의 사진 슬롯만 정리 — idbDelete 자체는 fire-and-forget이라 안전하지만,
+    // 그 앞뒤의 getSurveyRecords()/forEach/resolvePhotoSlot 같은 동기 코드는 이론상 던질 수 있다.
+    // 이미 확정된 outcome(예: "✅ N건 완료!")을 이 부수 작업 실패가 덮어쓰지 않도록 별도로 감싼다.
     if (successCount > 0 && failedCount === 0 && failedPhotoCount === 0 && !interrupted) {
-      const finalRecordsForCleanup = getSurveyRecords();
-      doneRecordIds.forEach(rid => {
-        const r = finalRecordsForCleanup.find(x => x.id === rid);
-        (r?.photoList || []).forEach(p => {
-          const s = resolvePhotoSlot(r.plotNo, p.filename);
-          if (s) idbDelete(s.cacheKey).catch(error => console.warn('업로드 완료 후 임시 캐시 삭제 실패:', error));
+      try {
+        const finalRecordsForCleanup = getSurveyRecords();
+        doneRecordIds.forEach(rid => {
+          const r = finalRecordsForCleanup.find(x => x.id === rid);
+          (r?.photoList || []).forEach(p => {
+            const s = resolvePhotoSlot(r.plotNo, p.filename);
+            if (s) idbDelete(s.cacheKey).catch(error => console.warn('업로드 완료 후 임시 캐시 삭제 실패:', error));
+          });
         });
-      });
+      } catch (cleanupErr) {
+        console.warn('업로드 후 캐시 정리 실패:', cleanupErr);
+        warnings.push('일부 임시 파일 정리에 문제가 있었습니다');
+      }
     }
 
     // markPlotDoneInDropdown은 동기 DOM/localStorage 코드라 실제로 던질 수 있다 — 실패해도
     // 전송 결과(outcome)는 그대로 두고 warnings에만 반영한다.
     if (successCount > 0) {
-      let dropdownFailed = false;
-      const successPlots = getSurveyRecords().filter(r => r.soilUploaded).map(r => r.plotNo);
-      successPlots.forEach(pn => {
-        if (markPlotDoneInDropdown(pn).status === 'failed') dropdownFailed = true;
-      });
-      if (dropdownFailed) warnings.push('표준지 목록 갱신에 문제가 있습니다');
+      try {
+        let dropdownFailed = false;
+        const successPlots = getSurveyRecords().filter(r => r.soilUploaded).map(r => r.plotNo);
+        successPlots.forEach(pn => {
+          if (markPlotDoneInDropdown(pn).status === 'failed') dropdownFailed = true;
+        });
+        if (dropdownFailed) warnings.push('표준지 목록 갱신에 문제가 있습니다');
+      } catch (dropdownErr) {
+        console.warn('표준지 드롭다운 일괄 갱신 실패:', dropdownErr);
+        warnings.push('표준지 목록 갱신에 문제가 있습니다');
+      }
     }
   } catch (err) {
     console.error(uploadLoopFinished ? 'autoRetry 후처리 오류' : 'autoRetry 루프 오류', err);
@@ -3615,7 +3627,14 @@ async function saveData() {
     return;
   }
 
-  const btn = document.getElementById('save-btn');
+  const btn = document.getElementById('save-btn'); // 참조만 — finally에서도 쓰므로 try 밖에서 미리 확보
+  let recordPersisted = false; // localStorage.setItem 성공 직후에만 true — 그 전/실패는 "저장 자체가 안 됨"
+  let outcome = { text: '기기에 저장하지 못했습니다. 입력 내용을 확인한 뒤 다시 시도해주세요', type: 'error' }; // 비관적 기본값
+  const warnings = [];
+
+  try {
+  // _isUploading=true부터 여기까지의 모든 DOM 조작을 try 안으로 — 버튼 비활성화 자체가
+  // 예외를 던져도 finally가 반드시 실행되어 플래그가 영구히 안 남게 하기 위함.
   btn.disabled = true;
   btn.textContent = '저장 중...';
   _isUploading = true; // saveData()는 네트워크 전송이 아니므로 isNetworkUploadActive는 건드리지 않는다
@@ -3624,11 +3643,6 @@ async function saveData() {
     b.disabled = true; b.textContent = '업로드 중...';
   });
 
-  let recordPersisted = false; // localStorage.setItem 성공 직후에만 true — 그 전/실패는 "저장 자체가 안 됨"
-  let outcome = { text: '기기에 저장하지 못했습니다. 입력 내용을 확인한 뒤 다시 시도해주세요', type: 'error' }; // 비관적 기본값
-  const warnings = [];
-
-  try {
   const plotNoSelect = document.getElementById('soil-plot-no-select');
   const plotNoInput  = document.getElementById('soil-plot-no');
   const plotNo = (plotNoSelect && plotNoSelect.style.display !== 'none' ? plotNoSelect.value : '') 
@@ -3840,13 +3854,13 @@ async function saveData() {
       ? { text: '❌ 기기에 저장하지 못했습니다 — 다시 시도해주세요', type: 'error' }
       : { text: '💾 조사 내용은 기기에 저장되었습니다 — 화면 갱신에 문제가 있으면 새로고침해주세요', type: 'info' };
   } finally {
+    _isUploading = false; // 순수 대입이라 항상 성공 — UI 복구보다 먼저 상태부터 확실히 푼다
     try {
       btn.disabled = false;
       btn.textContent = '저장';
     } catch (btnErr) {
       console.error('저장 버튼 복구 실패', btnErr);
     }
-    _isUploading = false;
     try {
       renderRecordsList();
     } catch (renderErr) {
@@ -6405,12 +6419,18 @@ async function reuploadRecord(id) {
       outcome = { text: '⏳ ' + rec.plotNo + ' 일부 사진이 아직 확정되지 않았습니다 — 잠시 후 다시 시도해주세요', type: 'info' };
     } else {
       outcome = { text: '✅ ' + rec.plotNo + ' 재업로드 완료!', type: 'success' };
-      // 이 레코드의 사진 슬롯만 정리 (다음 조사지 빈 슬롯 정확히 인식) — fire-and-forget이라
-      // 개별 실패는 콘솔 경고만 남기고 결과에는 반영하지 않는다(캐시 정리는 전송 결과와 무관).
-      (freshRecFinal.photoList || []).forEach(p => {
-        const s = resolvePhotoSlot(plotNo, p.filename);
-        if (s) idbDelete(s.cacheKey).catch(error => console.warn('업로드 완료 후 임시 캐시 삭제 실패:', error));
-      });
+      // 이 레코드의 사진 슬롯만 정리 (다음 조사지 빈 슬롯 정확히 인식) — idbDelete 자체는
+      // fire-and-forget이라 안전하지만, forEach/resolvePhotoSlot 같은 동기 코드는 이론상
+      // 던질 수 있다. 방금 확정한 "✅ 완료!" outcome을 이 부수 작업 실패가 덮어쓰지 않게 별도로 감싼다.
+      try {
+        (freshRecFinal.photoList || []).forEach(p => {
+          const s = resolvePhotoSlot(plotNo, p.filename);
+          if (s) idbDelete(s.cacheKey).catch(error => console.warn('업로드 완료 후 임시 캐시 삭제 실패:', error));
+        });
+      } catch (cleanupErr) {
+        console.warn('업로드 후 캐시 정리 실패:', cleanupErr);
+        warnings.push('일부 임시 파일 정리에 문제가 있었습니다');
+      }
     }
   } catch (err) {
     console.error(uploadLoopFinished ? '재업로드 후처리 오류' : '재업로드 오류', err);
