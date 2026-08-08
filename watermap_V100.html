@@ -3157,25 +3157,37 @@ function shouldContinueUpload() { return !uploadInterruptedByHidden; }
 // 줄여주는 보완이다. iOS 16.4 미만 등 미지원 환경에서는 navigator.wakeLock 자체가 없어
 // 조용히 무시되고 기존 동작 그대로 유지된다.
 let _wakeLockSentinel = null;
+let _wakeLockAttempt = 0; // acquire를 부를 때마다 증가 — 뒤늦게 도착한 요청을 무효화하는 데 쓴다
 async function acquireUploadWakeLock() {
   if (!navigator.wakeLock) return; // 미지원 브라우저 — 조용히 무시
+  const attempt = ++_wakeLockAttempt;
   try {
-    _wakeLockSentinel = await navigator.wakeLock.request('screen');
-    _wakeLockSentinel.addEventListener('release', () => {
+    const sentinel = await navigator.wakeLock.request('screen');
+    // request()가 완료되기 전에 업로드가 이미 끝났거나(releaseUploadWakeLock이 먼저 실행됨)
+    // 새 시도가 또 시작됐을 수 있다 — beginNetworkUploadAttempt()에서 이 함수를 기다리지
+    // 않고(fire-and-forget) 부르기 때문에 실제로 벌어질 수 있는 경합이다. 그 경우 이 늦게
+    // 도착한 sentinel을 그대로 저장하면 아무도 해제하지 않아 화면이 계속 켜진 채로 남는다.
+    if (attempt !== _wakeLockAttempt || !isNetworkUploadActive) {
+      await sentinel.release().catch(() => {});
+      return;
+    }
+    _wakeLockSentinel = sentinel;
+    sentinel.addEventListener('release', () => {
       // 브라우저가 스스로 해제한 경우(수동 잠금, 전화 수신 등) — 참조만 정리한다.
       // 이 시점에 uploadInterruptedByHidden은 이미 visibilitychange 리스너가 처리한다.
-      _wakeLockSentinel = null;
+      if (_wakeLockSentinel === sentinel) _wakeLockSentinel = null;
     });
   } catch (err) {
+    // 자동화 환경뿐 아니라 저전력 모드·배터리 상태·브라우저 정책·문서 비가시 상태 등
+    // 실기기에서도 정상적으로 발생할 수 있다 — 실패해도 업로드 자체는 그대로 진행한다.
     console.warn('화면 켜짐 유지 요청 실패:', err);
-    _wakeLockSentinel = null;
   }
 }
 function releaseUploadWakeLock() {
-  if (_wakeLockSentinel) {
-    _wakeLockSentinel.release().catch(() => {});
-    _wakeLockSentinel = null;
-  }
+  _wakeLockAttempt++; // 진행 중인 늦은 acquire 요청을 무효화
+  const sentinel = _wakeLockSentinel;
+  _wakeLockSentinel = null;
+  if (sentinel) sentinel.release().catch(() => {});
 }
 
 // autoRetryUpload()/reuploadRecord() 시작 시에만 호출 — 진행 중인 다른 시도가 없다는 게
