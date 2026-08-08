@@ -3149,18 +3149,49 @@ document.addEventListener('visibilitychange', () => {
 });
 function shouldContinueUpload() { return !uploadInterruptedByHidden; }
 
+// ====== 업로드 중 화면 켜짐 유지 (Screen Wake Lock) ======
+// 화면이 "일정 시간 안 만지면 자동으로 꺼지는" 가장 흔한 경우만 막아준다 — 사용자가 직접
+// 전원 버튼을 누르거나 전화가 오는 등의 이유로 꺼지는 건 막지 못한다(그 경우 브라우저가
+// wake lock을 스스로 즉시 해제한다). 그래서 uploadInterruptedByHidden 안전장치는 그대로
+// 둔다 — 이건 그 안전장치를 대체하는 게 아니라, 안전장치가 발동하는 가장 흔한 원인을 미리
+// 줄여주는 보완이다. iOS 16.4 미만 등 미지원 환경에서는 navigator.wakeLock 자체가 없어
+// 조용히 무시되고 기존 동작 그대로 유지된다.
+let _wakeLockSentinel = null;
+async function acquireUploadWakeLock() {
+  if (!navigator.wakeLock) return; // 미지원 브라우저 — 조용히 무시
+  try {
+    _wakeLockSentinel = await navigator.wakeLock.request('screen');
+    _wakeLockSentinel.addEventListener('release', () => {
+      // 브라우저가 스스로 해제한 경우(수동 잠금, 전화 수신 등) — 참조만 정리한다.
+      // 이 시점에 uploadInterruptedByHidden은 이미 visibilitychange 리스너가 처리한다.
+      _wakeLockSentinel = null;
+    });
+  } catch (err) {
+    console.warn('화면 켜짐 유지 요청 실패:', err);
+    _wakeLockSentinel = null;
+  }
+}
+function releaseUploadWakeLock() {
+  if (_wakeLockSentinel) {
+    _wakeLockSentinel.release().catch(() => {});
+    _wakeLockSentinel = null;
+  }
+}
+
 // autoRetryUpload()/reuploadRecord() 시작 시에만 호출 — 진행 중인 다른 시도가 없다는 게
 // 이미 확인된 뒤(호출부의 _isUploading 가드를 통과한 뒤)라야 안전하다(경합 없음).
 function beginNetworkUploadAttempt() {
   uploadInterruptedByHidden = false;
   isNetworkUploadActive = true;
   _isUploading = true;
+  acquireUploadWakeLock(); // 결과를 기다리지 않음(fire-and-forget) — 획득 전이라도 업로드는 즉시 진행
 }
 // finally에서만 호출 — uploadInterruptedByHidden은 절대 여기서 건드리지 않는다(다음 시도의
 // beginNetworkUploadAttempt()만 리셋한다) — 그래야 이번 시도가 중단된 결과를 정확히 안내할 수 있다.
 function finishNetworkUploadAttempt() {
   isNetworkUploadActive = false;
   _isUploading = false;
+  releaseUploadWakeLock();
 }
 
 // ====== 저장목록 탭 "미전송 N건 전송" 버튼으로 수동 실행 (자동 트리거 없음) ======
