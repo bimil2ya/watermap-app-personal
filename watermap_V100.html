@@ -2906,16 +2906,22 @@ async function syncCompletedPlots() {
   try {
     const res  = await fetch(scriptUrl + '?action=getCompletedPlots');
     const data = await res.json();
-    if (!data.completed) return;
+    if (!Array.isArray(data.completed)) return;
 
-    const completedSet = new Set(data.completed.map(p => p.toString().trim()));
-    const plots = JSON.parse(saved);
+    const completedSet = new Set(
+      data.completed.filter(p => typeof p === 'string' && p.trim() !== '').map(p => p.trim())
+    );
+
+    let plots;
+    try { plots = JSON.parse(saved); } catch (e) { return; }
+    if (!Array.isArray(plots)) return;
+
     let changed = false;
-
     plots.forEach(p => {
-      if (typeof p !== 'object') return;
+      // typeof null === 'object'라 p !== null을 typeof 검사보다 먼저(또는 함께) 확인해야 한다.
+      if (!p || typeof p !== 'object' || Array.isArray(p) || typeof p.plotNo !== 'string' || !p.plotNo.trim()) return;
       const wasDone = p.done === '완료' || p.done === 'O' || p.done === 'Y';
-      const isDone  = completedSet.has(p.plotNo.toString().trim());
+      const isDone  = completedSet.has(p.plotNo.trim());
       if (wasDone !== isDone) {
         p.done = isDone ? '완료' : '';
         changed = true;
@@ -2923,8 +2929,8 @@ async function syncCompletedPlots() {
     });
 
     if (changed) {
-      localStorage.setItem('loaded_plots', JSON.stringify(plots));
-      applyLoadedPlots(plots, teamCode);
+      localStorage.setItem('loaded_plots', JSON.stringify(plots)); // 원본 배열 구조 그대로(무효 항목도 보존), done만 갱신
+      applyLoadedPlots(normalizeLoadedPlots(plots).items, teamCode); // 화면 표시만 정규화된 목록으로
     }
   } catch(e) {
     // 오프라인이거나 실패 시 무시
@@ -5081,6 +5087,50 @@ async function deletePhoto(idx) {
   showToast('사진 삭제됨: ' + PHOTO_SLOTS[idx], 'info');
 }
 // ====== 팀 관리 (구글 시트 기반) ======
+// loaded_plots/cached_teams는 서버 응답을 그대로 캐시한 값이라 형식이 깨질 수 있다.
+// 아래 정규화 함수들은 순수 함수 — DOM/localStorage/toast에 손대지 않고 표시용 결과만 만든다.
+// 호출부가 items(정규화 결과)를 쓸지, 원본 배열을 구조만 보존한 채 다시 쓸지 각자 판단한다.
+function normalizeLoadedPlots(list) {
+  const wasArray = Array.isArray(list);
+  const source = wasArray ? list : [];
+  const items = source
+    .filter(p =>
+      typeof p === 'string' ? p.trim() !== ''
+      : (p !== null && typeof p === 'object' && !Array.isArray(p) && typeof p.plotNo === 'string' && p.plotNo.trim() !== '')
+    )
+    .map(p => typeof p === 'string' ? p.trim() : { ...p, plotNo: p.plotNo.trim() });
+  return { items, removedCount: source.length - items.length, wasArray, originalLength: source.length };
+}
+
+function normalizeCachedTeams(list) {
+  const wasArray = Array.isArray(list);
+  const source = wasArray ? list : [];
+  const items = source.filter(t => typeof t === 'string' && t.trim() !== '').map(t => t.trim());
+  return { items, removedCount: source.length - items.length, wasArray, originalLength: source.length };
+}
+
+// loaded_plots를 안전하게 읽어 정규화된 표시용 목록만 돌려준다(원본 localStorage는 건드리지 않음).
+function getLoadedPlotItems() {
+  let rawPlots;
+  try { rawPlots = JSON.parse(localStorage.getItem('loaded_plots') || '[]'); }
+  catch (e) { console.warn('loaded_plots 파싱 실패:', e); rawPlots = []; }
+  return normalizeLoadedPlots(rawPlots).items;
+}
+
+// 드롭다운에서 선택된 plotNo(이미 정규화된 값)로 정규화된 목록에서 항목을 찾는다.
+function findLoadedPlot(val) {
+  const target = typeof val === 'string' ? val.trim() : '';
+  if (!target) return null;
+  return getLoadedPlotItems().find(p => (typeof p === 'string' ? p : p.plotNo) === target) || null;
+}
+
+function getCachedTeams() {
+  let rawTeams;
+  try { rawTeams = JSON.parse(localStorage.getItem('cached_teams') || '[]'); }
+  catch (e) { console.warn('cached_teams 파싱 실패:', e); rawTeams = []; }
+  return normalizeCachedTeams(rawTeams).items;
+}
+
 async function loadTeamList() {
   const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
   const btn    = document.getElementById('load-team-btn');
@@ -5101,31 +5151,38 @@ async function loadTeamList() {
     const res  = await fetch(scriptUrl + '?action=getTeams');
     const data = await res.json();
 
-    if (!data.teams || data.teams.length === 0) {
+    const norm = normalizeCachedTeams(data.teams);
+    if (norm.wasArray && norm.originalLength === 0) {
       status.style.cssText = 'display:block;font-size:13px;padding:8px 10px;border-radius:6px;background:var(--warning-bg);color:var(--warning);';
       status.textContent = '팀 목록이 없습니다. 구글 시트 조사팀관리 D열(조사팀)에 팀명을 입력해주세요.';
-      // 드롭다운 및 캐시 초기화
+      // 드롭다운 및 캐시 초기화 — 서버가 정상적으로 빈 배열을 반환한 경우
       fillTeamDropdowns([], '');
       localStorage.removeItem('cached_teams');
       localStorage.removeItem('team_code');
       return;
     }
+    if (norm.items.length === 0) {
+      // 비배열 응답이거나 배열인데 전부 무효 — 기존 캐시/화면 보존
+      status.style.cssText = 'display:block;font-size:13px;padding:8px 10px;border-radius:6px;background:var(--warning-bg);color:var(--warning);';
+      status.textContent = '팀 목록 데이터 형식이 올바르지 않습니다 — 관리자에게 문의해주세요';
+      return;
+    }
 
     // 팀 목록 두 드롭다운 모두 업데이트
     const current = document.getElementById('setting-team-code')?.value || '';
-    fillTeamDropdowns(data.teams, current);
+    fillTeamDropdowns(norm.items, current);
 
     // 로컬에 저장 (오프라인 대비)
-    localStorage.setItem('cached_teams', JSON.stringify(data.teams));
+    localStorage.setItem('cached_teams', JSON.stringify(norm.items));
 
-    status.textContent = '✓ 팀 목록 ' + data.teams.length + '개 불러옴: ' + data.teams.join(', ');
+    status.textContent = '✓ 팀 목록 ' + norm.items.length + '개 불러옴: ' + norm.items.join(', ')
+      + (norm.removedCount > 0 ? ` (형식 오류 ${norm.removedCount}건 제외)` : '');
     showToast('✓ 팀 목록 불러오기 완료', 'success');
 
   } catch(e) {
     // 오프라인 시 캐시된 팀 목록 사용
-    const cached = localStorage.getItem('cached_teams');
-    if (cached) {
-      const teams = JSON.parse(cached);
+    const teams = getCachedTeams();
+    if (teams.length > 0) {
       fillTeamDropdowns(teams, localStorage.getItem('team_code') || '');
       status.style.cssText = 'display:block;font-size:13px;padding:8px 10px;border-radius:6px;background:var(--warning-bg);color:var(--warning);';
       status.textContent = '오프라인 — 이전 저장된 팀 목록 사용: ' + teams.join(', ');
@@ -5140,12 +5197,9 @@ async function loadTeamList() {
 }
 
 function rebuildTeamDropdown() {
-  const cached  = localStorage.getItem('cached_teams');
   const current = localStorage.getItem('team_code') || '';
-  if (cached) {
-    const teams = JSON.parse(cached);
-    fillTeamDropdowns(teams, current);
-  }
+  if (localStorage.getItem('cached_teams') === null) return; // 캐시 자체가 없으면 원본처럼 건드리지 않음
+  fillTeamDropdowns(getCachedTeams(), current); // 값이 있었지만 손상됐다면 빈 배열로 안전하게 표시
 }
 
 // 더 이상 사용 안 함 (호환성 유지용 빈 함수)
@@ -5172,28 +5226,41 @@ async function loadPlotPoints() {
     const res  = await fetch(url);
     const data = await res.json();
 
-    if (!data.plots || data.plots.length === 0) {
+    const norm = normalizeLoadedPlots(data.plots);
+    if (norm.wasArray && norm.originalLength === 0) {
+      // 서버가 정상적으로 빈 배열을 반환 — 이전 팀의 잔여 캐시/화면까지 함께 정리해야
+      // 재시작 시 loadSettings()가 이전 팀 포인트를 이 팀 것처럼 되살리지 않는다.
+      localStorage.setItem('loaded_plots', JSON.stringify([]));
+      applyLoadedPlots([], teamCode);
       statusMsg.style.cssText = 'background:var(--warning-bg);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--warning);';
       statusMsg.textContent = teamCode + ' 배정 포인트가 없습니다. 조사팀관리 시트의 C열(주차) 값을 확인해주세요';
       return;
     }
-    localStorage.setItem('loaded_plots', JSON.stringify(data.plots));
-    applyLoadedPlots(data.plots, teamCode);
-    const doneCount = data.plots.filter(p => {
+    if (norm.items.length === 0) {
+      // 비배열 응답이거나 배열인데 전부 무효 — 기존 캐시/화면 보존, loaded_plots를 건드리지 않는다
+      statusMsg.style.cssText = 'background:var(--warning-bg);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--warning);';
+      statusMsg.textContent = '유효한 포인트 데이터를 받지 못했습니다 — 관리자에게 문의하거나 잠시 후 다시 시도해주세요';
+      showToast('⚠️ 포인트 데이터 형식이 올바르지 않습니다', 'error');
+      return;
+    }
+
+    localStorage.setItem('loaded_plots', JSON.stringify(norm.items));
+    applyLoadedPlots(norm.items, teamCode);
+    const doneCount = norm.items.filter(p => {
       const d = typeof p === 'object' ? p.done : '';
       return d === '완료' || d === 'O' || d === 'Y';
     }).length;
-    const weekSet = new Set(data.plots.map(p => p.week).filter(Boolean));
+    const weekSet = new Set(norm.items.map(p => typeof p === 'object' ? p.week : undefined).filter(Boolean));
     const weekInfo = weekSet.size > 0 ? ' · ' + [...weekSet].sort().join(', ') : '';
-    statusMsg.textContent = '✓ ' + teamCode + ' 포인트 ' + data.plots.length + '개 로드 (완료 ' + doneCount + '개 / 미완료 ' + (data.plots.length - doneCount) + '개)' + weekInfo;
-    showToast('✓ ' + data.plots.length + '개 포인트 불러옴', 'success');
+    statusMsg.textContent = '✓ ' + teamCode + ' 포인트 ' + norm.items.length + '개 로드 (완료 ' + doneCount + '개 / 미완료 ' + (norm.items.length - doneCount) + '개)' + weekInfo
+      + (norm.removedCount > 0 ? ' · 형식 오류 ' + norm.removedCount + '건 제외' : '');
+    showToast('✓ ' + norm.items.length + '개 포인트 불러옴', 'success');
   } catch(e) {
-    const saved = localStorage.getItem('loaded_plots');
-    if (saved) {
-      const plots = JSON.parse(saved);
-      applyLoadedPlots(plots, teamCode);
+    const items = getLoadedPlotItems();
+    if (items.length > 0) {
+      applyLoadedPlots(items, teamCode);
       statusMsg.style.cssText = 'background:var(--warning-bg);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--warning);';
-      statusMsg.textContent = '오프라인 — 이전에 저장된 ' + plots.length + '개 포인트 사용';
+      statusMsg.textContent = '오프라인 — 이전에 저장된 ' + items.length + '개 포인트 사용';
     } else {
       statusMsg.style.cssText = 'background:var(--danger-bg);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--danger);';
       statusMsg.textContent = '불러오기 실패. 인터넷 연결 확인 필요';
@@ -5427,8 +5494,7 @@ function selectCustomPlot(val) {
   if (display) {
     if (val) {
       // 완료 여부에 따라 색상 지정
-      const plots = JSON.parse(localStorage.getItem('loaded_plots') || '[]');
-      const p = plots.find(p => (typeof p === 'object' ? p.plotNo : p) === val);
+      const p = findLoadedPlot(val);
       const isDone = p && typeof p === 'object' && (p.done === '완료' || p.done === 'O' || p.done === 'Y');
       display.textContent = isDone ? '✓ ' + val : val;
       display.style.color = isDone ? '#2E7D32' : '#E07B00';
@@ -5462,17 +5528,28 @@ function markPlotDoneInDropdown(plotNo) {
     // loaded_plots 업데이트
     const saved = localStorage.getItem('loaded_plots');
     if (!saved) return { status: 'skipped' };
-    const plots = JSON.parse(saved);
-    const idx = plots.findIndex(p => (typeof p === 'object' ? p.plotNo : p) === plotNo);
-    if (idx !== -1) {
-      if (typeof plots[idx] === 'object') plots[idx].done = '완료';
-      else plots[idx] = { plotNo, done: '완료' };
-      localStorage.setItem('loaded_plots', JSON.stringify(plots));
+    let rawPlots;
+    try { rawPlots = JSON.parse(saved); } catch (parseErr) {
+      console.warn('loaded_plots 파싱 실패:', parseErr);
+      return { status: 'failed', error: parseErr };
     }
-    // 드롭다운 즉시 재구성
+    if (!Array.isArray(rawPlots)) return { status: 'skipped' };
+
+    const target = typeof plotNo === 'string' ? plotNo.trim() : '';
+    const idx = rawPlots.findIndex(p =>
+      typeof p === 'string'
+        ? p.trim() === target
+        : p !== null && typeof p === 'object' && !Array.isArray(p) &&
+          typeof p.plotNo === 'string' && p.plotNo.trim() === target
+    );
+    if (idx !== -1) {
+      if (typeof rawPlots[idx] === 'string') rawPlots[idx] = { plotNo: target, done: '완료' };
+      else rawPlots[idx].done = '완료';
+      localStorage.setItem('loaded_plots', JSON.stringify(rawPlots)); // 대상 외 항목(무효 항목 포함)은 구조 그대로 보존
+    }
+    // 드롭다운 즉시 재구성 — 화면 표시만 정규화된 목록 사용
     const teamCode = localStorage.getItem('loaded_team') || '';
-    const updatedPlots = JSON.parse(localStorage.getItem('loaded_plots') || '[]');
-    applyLoadedPlots(updatedPlots, teamCode);
+    applyLoadedPlots(normalizeLoadedPlots(rawPlots).items, teamCode);
     // 현재 선택된 값 표시 업데이트
     const display = document.getElementById('custom-plot-display');
     if (display && display.textContent.replace('✓ ','').trim() === plotNo) {
@@ -5514,8 +5591,7 @@ function onPlotSelect(val) {
   // 커스텀 드롭다운 표시 동기화
   const display = document.getElementById('custom-plot-display');
   if (display && val) {
-    const plots = JSON.parse(localStorage.getItem('loaded_plots') || '[]');
-    const p = plots.find(pp => (typeof pp === 'object' ? pp.plotNo : pp) === val);
+    const p = findLoadedPlot(val);
     const isDone = p && typeof p === 'object' && (p.done === '완료' || p.done === 'O' || p.done === 'Y');
     display.textContent = isDone ? '✓ ' + val : val;
     display.style.color = isDone ? '#2E7D32' : '#E07B00';
@@ -5884,7 +5960,7 @@ function loadSettings() {
   const savedPlots = localStorage.getItem('loaded_plots');
   const savedTeam  = localStorage.getItem('loaded_team');
   if (savedPlots && savedTeam) {
-    applyLoadedPlots(JSON.parse(savedPlots), savedTeam);
+    applyLoadedPlots(getLoadedPlotItems(), savedTeam);
   }
 }
 
