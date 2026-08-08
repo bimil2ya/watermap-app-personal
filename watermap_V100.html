@@ -6250,9 +6250,8 @@ async function reuploadRecord(id) {
   const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
   if (!scriptUrl) { showToast('Google 연동 설정이 필요합니다', 'error'); return; }
 
-  beginNetworkUploadAttempt();
-  const btn = document.getElementById('reupload-btn-' + id);
-  const saveBtn = document.getElementById('save-btn');
+  let btn; // finally에서도 쓰므로 try 밖에서 선언만 — 실제 조회는 try 안(아래)에서
+  let saveBtn;
   let interrupted = false;
   let recordFailed = false;
   let uploadLoopFinished = false; // 전송 로직이 예외 없이 끝까지 돌았다는 뜻(성공/실패와 무관)
@@ -6260,8 +6259,11 @@ async function reuploadRecord(id) {
   const warnings = [];
 
   try {
-    // 버튼 비활성화·진행 토스트·필드 계산도 try 안으로 — beginNetworkUploadAttempt() 이후
-    // 예외가 나는 모든 지점이 finally에서 반드시 정리되게 하기 위함.
+    // beginNetworkUploadAttempt() 이후의 모든 코드를 try 안으로 — DOM 조회·버튼 비활성화·
+    // 진행 토스트가 예외를 던져도 finally가 반드시 실행되어 플래그가 영구히 안 남게 하기 위함.
+    beginNetworkUploadAttempt();
+    btn = document.getElementById('reupload-btn-' + id);
+    saveBtn = document.getElementById('save-btn');
     if (btn) { btn.disabled = true; btn.textContent = '업로드 중...'; }
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '업로드 중...'; }
     // 다른 재업로드 버튼도 비활성화
