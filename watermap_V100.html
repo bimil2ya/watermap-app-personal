@@ -2938,7 +2938,15 @@ async function syncCompletedPlots() {
 }
 
 // ====== 오프라인 대기열 ======
-function getQueue() { return JSON.parse(localStorage.getItem('upload_queue') || '[]'); }
+function getQueue() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('upload_queue') || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn('upload_queue 파싱 실패 — 빈 큐로 대체 (원본 데이터는 localStorage에 남아있음)', e);
+    return [];
+  }
+}
 function saveQueue(q) { localStorage.setItem('upload_queue', JSON.stringify(q)); }
 // ====== 저장목록 탭 "미전송 N건 전송" 버튼 ======
 function manualSendAll() {
@@ -3255,7 +3263,13 @@ async function autoRetryUpload() {
     try {
       const plotNo   = rec.plotNo;
       // teamCode: 저장된 soilRow[32] 우선, 없으면 localStorage fallback
-      const teamCode = (rec.soilRow && rec.soilRow[6]) || localStorage.getItem('team_code') || '';
+      // 문자열이고 trim 후에도 비어있지 않은 soilRow[6]만 우선 사용, 그 외(비문자열·
+      // 빈 문자열·공백뿐인 문자열, 손상된 레거시 데이터 포함)는 전부 team_code로 폴백한다.
+      const recordTeam = rec.soilRow && rec.soilRow[6];
+      const rawTeamCode = (typeof recordTeam === 'string' && recordTeam.trim())
+        ? recordTeam
+        : (localStorage.getItem('team_code') || '');
+      const teamCode = typeof rawTeamCode === 'string' ? rawTeamCode.trim() : '';
       // weekCode: 저장된 soilRow[33] 우선, 없으면 _plotMap 참조
       const weekCode = (rec.soilRow && rec.soilRow[34])
         || (window._plotMap && window._plotMap[plotNo] && window._plotMap[plotNo].week)
@@ -6049,7 +6063,7 @@ function getSoilData() {
     g('soil-date'),                                                    // [3]  D열 조사일
     c(CODE.weather, g('soil-weather')),                                // [4]  E열 날씨
     company,                                                           // [5]  F열 수행사
-    localStorage.getItem('team_code') || '',                          // [6]  G열 조사책임자
+    (localStorage.getItem('team_code') || '').trim(),                  // [6]  G열 조사책임자
     moveNeed,                                                          // [7]  H열 조사지이동필요성
     g('soil-x'),                                                       // [8]  I열 X좌표
     g('soil-y'),                                                       // [9]  J열 Y좌표
@@ -6285,7 +6299,7 @@ function renderRecordsList() {
         ['토양형', r.soilRow?.[26]], ['토색A', r.soilRow?.[17]],
         ['토심A', r.soilRow?.[15] ? r.soilRow[15]+'cm' : ''],
       ].filter(([,v]) => v).map(([k,v]) =>
-        `<span style="font-size:11px;padding:2px 6px;border-radius:20px;background:#E1F5EE;color:#0F6E56;margin:2px 2px 0 0;display:inline-block;">${k}: ${v}</span>`
+        `<span style="font-size:11px;padding:2px 6px;border-radius:20px;background:#E1F5EE;color:#0F6E56;margin:2px 2px 0 0;display:inline-block;">${k}: ${escapeHtml(v)}</span>`
       ).join('');
       return `
       <div class="record-item" style="padding:0;overflow:hidden;">
@@ -6318,15 +6332,15 @@ function renderRecordsList() {
       const treeCount = r.treeRows?.length || 0;
       const treePreview = treeCount > 0
         ? r.treeRows.slice(0,3).map(t =>
-            `<span style="font-size:11px;padding:2px 6px;border-radius:20px;background:#EAF3DE;color:#3B6D11;margin:2px 2px 0 0;display:inline-block;">No.${t[5]} ${t[6]||'-'} ${t[7]?t[7]+'cm':''} ${t[8]?t[8]+'m':''}</span>`
+            `<span style="font-size:11px;padding:2px 6px;border-radius:20px;background:#EAF3DE;color:#3B6D11;margin:2px 2px 0 0;display:inline-block;">No.${escapeHtml(t[5])} ${escapeHtml(t[6]||'-')} ${t[7]?escapeHtml(t[7])+'cm':''} ${t[8]?escapeHtml(t[8])+'m':''}</span>`
           ).join('') + (treeCount > 3 ? `<span style="font-size:11px;color:var(--text-sub);margin-left:2px;">외 ${treeCount-3}본</span>` : '')
         : '<span style="font-size:11px;color:var(--text-sub);">임목 미입력</span>';
       return `
       <div class="record-item" style="padding:0;overflow:hidden;">
         <button class="record-delete" onclick="deleteRecord(${r.id})" title="삭제">×</button>
         <div style="padding:10px 40px 8px 14px;border-bottom:0.5px solid var(--gray-border);">
-          <div style="font-size:15px;font-weight:700;color:var(--text);">표준지 ${r.plotNo}</div>
-          <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">${r.basin || '유역 미입력'} · ${r.date || '날짜 미입력'} · 총 ${treeCount}본</div>
+          <div style="font-size:15px;font-weight:700;color:var(--text);">표준지 ${escapeHtml(r.plotNo)}</div>
+          <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">${escapeHtml(r.basin || '유역 미입력')} · ${escapeHtml(r.date || '날짜 미입력')} · 총 ${treeCount}본</div>
         </div>
         <div style="padding:8px 14px 0;">
           ${(treeCount > 0 && !r.treeUploaded) ? `<button id="reupload-btn-${r.id}" onclick="reuploadRecord(${r.id})" ${reuploadDisabled}>
@@ -6356,7 +6370,7 @@ function renderRecordsList() {
       const allDone = total > 0 && doneCnt === total;
       const photoRows = photos.map(p =>
         `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--gray-bg);">
-          <span style="font-size:12px;color:var(--text);flex:1;word-break:break-all;">${p.filename}</span>
+          <span style="font-size:12px;color:var(--text);flex:1;word-break:break-all;">${escapeHtml(p.filename)}</span>
           <span style="flex-shrink:0;margin-left:8px;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;
             ${p.uploaded ? 'background:#E1F5EE;color:#0F6E56;' : 'background:#FDECEA;color:#C0392B;'}">
             ${p.uploaded ? '✓ 완료' : '✗ 실패'}
@@ -6426,7 +6440,13 @@ async function reuploadRecord(id) {
     showToast('📤 ' + rec.plotNo + ' 재업로드 중...', 'info'); // 진행 상태 토스트 — 최종 결과 토스트와 별개
 
     const plotNo   = rec.plotNo;
-    const teamCode = (rec.soilRow && rec.soilRow[6]) || localStorage.getItem('team_code') || '';
+    // 문자열이고 trim 후에도 비어있지 않은 soilRow[6]만 우선 사용, 그 외(비문자열·
+    // 빈 문자열·공백뿐인 문자열, 손상된 레거시 데이터 포함)는 전부 team_code로 폴백한다.
+    const recordTeam = rec.soilRow && rec.soilRow[6];
+    const rawTeamCode = (typeof recordTeam === 'string' && recordTeam.trim())
+      ? recordTeam
+      : (localStorage.getItem('team_code') || '');
+    const teamCode = typeof rawTeamCode === 'string' ? rawTeamCode.trim() : '';
     const weekCode = (rec.soilRow && rec.soilRow[34]) || (window._plotMap && window._plotMap[plotNo]?.week) || '주차미정';
     const folderId = localStorage.getItem('drive_folder') || MASTER_DRIVE_FOLDER;
 
