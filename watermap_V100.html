@@ -2871,6 +2871,15 @@ function validateTab(tabId) {
 // ====== 탭 전환 (유효성 검사 포함) ======
 const TAB_ORDER = ['tab-soil', 'tab-tree', 'tab-photo', 'tab-list', 'tab-setting'];
 function switchTab(id, btn) {
+  // 탭 버튼을 눌러 이 함수가 호출됐다는 것 자체가 화면을 막는 모달이 열려있지
+  // 않다는 증거다 — 이 시점에 배경 스크롤 잠금이 남아있다면 어떤 오버레이가
+  // 닫기 경로를 놓쳐 unlockBodyScroll()을 못 부른 누수로 보고 강제 해제한다.
+  if (_bodyScrollLocks.size > 0) {
+    console.warn('스크롤 잠금 누수 감지, 강제 해제:', [..._bodyScrollLocks]);
+    _bodyScrollLocks.clear();
+    document.body.style.overflow = _bodyScrollOverflowBeforeLock || '';
+  }
+
   // 앞 탭으로 이동하거나 목록/설정 탭은 검사 생략
   const freeMove = ['tab-list', 'tab-setting', 'tab-photo'];
   const fromIdx = TAB_ORDER.indexOf(currentTab);
@@ -2924,6 +2933,29 @@ document.addEventListener('visibilitychange', () => {
   }
   if (document.visibilityState === 'visible' && navigator.onLine) {
     syncCompletedPlots();
+  }
+});
+
+// 백그라운드 정지 중 오버레이의 닫기 이벤트가 유실되면 스크롤 잠금이 영구히
+// 남을 수 있다 — 복귀 시점에 실제로 열려있는 오버레이가 하나도 없는데 잠금만
+// 남아있다면 누수로 보고 정리한다.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || _bodyScrollLocks.size === 0) return;
+  // number-picker-backdrop은 CSS 클래스 기본값(display:none)에 의존하고 열릴 때만
+  // 인라인 style을 붙이므로, 인라인 style.display만 보면 초기 상태(빈 문자열)를
+  // "열림"으로 오판할 수 있다 — getComputedStyle로 실제 렌더링된 값을 확인한다.
+  const isOverlayVisible = (id) => {
+    const el = document.getElementById(id);
+    return !!el && getComputedStyle(el).display !== 'none';
+  };
+  const anyOverlayOpen =
+    isOverlayVisible('number-picker-backdrop') ||
+    isOverlayVisible('photo-action-sheet') ||
+    isOverlayVisible('photo-viewer');
+  if (!anyOverlayOpen) {
+    console.warn('복귀 시 스크롤 잠금 누수 감지, 강제 해제:', [..._bodyScrollLocks]);
+    _bodyScrollLocks.clear();
+    document.body.style.overflow = _bodyScrollOverflowBeforeLock || '';
   }
 });
 
