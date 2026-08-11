@@ -1571,6 +1571,37 @@ function json(obj) {
     </div><!-- /admin-content -->
   </div><!-- /admin 섹션 -->
 
+  <!-- 팀별 누적 현황 (관리자 잠금 밖 — 완료 개수는 기존에도 비관리자가 볼 수 있는 정보) -->
+  <div class="card" style="margin-bottom:14px;">
+    <div class="card-header">
+      <span class="card-header-icon">📊</span>
+      <h2>팀별 누적 현황</h2>
+    </div>
+    <div class="card-body">
+      <div style="font-size:12px;color:var(--text-sub);margin-bottom:10px;">
+        날짜와 무관하게 지금까지 누적으로 업로드된 개수입니다(오늘 업로드한 개수가 아닙니다).
+      </div>
+      <div id="team-summary-lock-box" style="background:var(--gray-bg);border:0.5px solid var(--gray-border);border-radius:var(--radius-sm);padding:10px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:center;">
+        <span style="font-size:12px;color:var(--text-sub);">🔒 비밀번호</span>
+        <input type="password" id="team-summary-pw-input" placeholder="비밀번호" maxlength="10"
+          style="width:100px;padding:5px 8px;border:0.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:13px;text-align:center;"
+          onkeydown="if(event.key==='Enter') checkTeamSummaryPw()">
+        <button onclick="checkTeamSummaryPw()"
+          style="padding:5px 12px;background:var(--green);color:white;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:700;cursor:pointer;">
+          확인
+        </button>
+        <span id="team-summary-pw-error" style="display:none;font-size:12px;color:var(--danger);width:100%;text-align:center;">틀렸습니다</span>
+        <span style="font-size:11px;color:var(--text-sub);width:100%;text-align:center;">힌트: 집번호4자리</span>
+      </div>
+      <button onclick="loadTeamSummary()" id="load-team-summary-btn"
+        style="display:none;width:100%;padding:11px;background:var(--green);color:white;border:none;border-radius:var(--radius-sm);font-size:14px;font-weight:700;cursor:pointer;">
+        🔄 전체 팀 현황 불러오기
+      </button>
+      <div id="team-summary-status" style="display:none;margin-top:8px;font-size:12px;color:var(--text-sub);"></div>
+      <div id="team-summary-list" style="margin-top:10px;"></div>
+    </div>
+  </div>
+
 </div><!-- /tab-setting -->
 
 <!-- 이미지 전체화면 뷰어 -->
@@ -5236,6 +5267,147 @@ function rebuildTeamDropdown() {
 // 더 이상 사용 안 함 (호환성 유지용 빈 함수)
 function buildTeamInputs() {}
 function saveTeamNames()  {}
+
+// ====== 팀별 누적 현황 (누적 기준, 날짜별 아님 — getPlots가 날짜 정보를 안 줌) ======
+async function loadTeamSummary() {
+  const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
+  const btn = document.getElementById('load-team-summary-btn');
+  const status = document.getElementById('team-summary-status');
+  const listEl = document.getElementById('team-summary-list');
+  if (!btn || !status || !listEl) return;
+
+  btn.disabled = true;
+  btn.textContent = '불러오는 중...';
+  status.style.display = 'block';
+  status.style.color = 'var(--text-sub)'; // 이전 실행에서 남은 색상(성공/실패) 초기화
+  status.textContent = '팀 목록 확인 중...';
+  listEl.innerHTML = '';
+
+  try {
+    const teamsRes = await fetchWithTimeout(scriptUrl + '?action=getTeams', {}, 20000);
+    const teamsData = await teamsRes.json();
+    const teamsNorm = normalizeCachedTeams(teamsData.teams);
+    const teams = teamsNorm.items;
+
+    if (teams.length === 0) {
+      // 정상적으로 빈 배열(팀이 아직 없음) vs 응답 형식이 이상해서 비어버린 경우를 구분 —
+      // loadTeamList()/loadPlotPoints()와 동일한 원칙
+      status.style.color = 'var(--warning)';
+      status.textContent = (teamsNorm.wasArray && teamsNorm.originalLength === 0)
+        ? '팀 목록이 없습니다.'
+        : '팀 목록 응답 형식이 올바르지 않습니다 — 관리자에게 문의해주세요.';
+      return;
+    }
+
+    status.style.color = 'var(--text-sub)';
+    status.textContent = teams.length + '개 팀 조회 중...';
+
+    const results = await Promise.allSettled(teams.map(async team => {
+      const url = scriptUrl + '?action=getPlots&team=' + encodeURIComponent(team);
+      const res = await fetchWithTimeout(url, {}, 20000);
+      const data = await res.json();
+      const norm = normalizeLoadedPlots(data.plots);
+      const isDone = p => {
+        const d = typeof p === 'object' ? p.done : '';
+        return d === '완료' || d === 'O' || d === 'Y';
+      };
+
+      // 팀명 옆에 표시할 고유 유역명 (문자열 항목은 basin이 없으므로 자동 제외됨)
+      const basinSet = new Set();
+      norm.items.forEach(p => {
+        const b = typeof p === 'object' ? (p.basin || '').toString().trim() : '';
+        if (b) basinSet.add(b);
+      });
+
+      // applyLoadedPlots()의 groupByWeek/sortedWeekKeys와 동일한 규칙 재사용
+      const weekGroups = {};
+      norm.items.forEach(p => {
+        const week = (typeof p === 'object' ? p.week : '') || '주차미정';
+        (weekGroups[week] = weekGroups[week] || []).push(p);
+      });
+      const weekKeys = Object.keys(weekGroups).sort((a, b) => (parseInt(a)||9999) - (parseInt(b)||9999));
+      const weeks = weekKeys.map(week => {
+        const arr = weekGroups[week];
+        return { week, total: arr.length, done: arr.filter(isDone).length };
+      });
+
+      const doneCount = norm.items.filter(isDone).length;
+      return {
+        team,
+        basins: [...basinSet],
+        total: norm.items.length,
+        done: doneCount,
+        removedCount: norm.removedCount,
+        weeks
+      };
+    }));
+
+    let totalAll = 0, doneAll = 0;
+    const failedTeams = [];
+    const rows = results.map((r, i) => {
+      if (r.status === 'fulfilled') {
+        totalAll += r.value.total;
+        doneAll += r.value.done;
+        const removedNote = r.value.removedCount > 0
+          ? ` <span style="color:var(--warning);">(형식오류 ${r.value.removedCount}건 제외)</span>`
+          : '';
+        // 유역명 라벨 — 팀에 유역 정보가 하나도 없으면 라벨 자체를 생략
+        const basinLabel = r.value.basins.length > 0
+          ? ` <span style="color:var(--text-sub);font-weight:400;">(${r.value.basins.map(escapeHtml).join(', ')})</span>`
+          : '';
+
+        // 주차별 하위 행 — 그 주차만의 완료/전체 + 그 주차까지의 누적 완료/전체
+        let cumDone = 0, cumTotal = 0;
+        const weekRows = r.value.weeks.map(w => {
+          cumDone += w.done;
+          cumTotal += w.total;
+          const label = w.week === '주차미정' ? '주차미정' : (w.week + '주차');
+          return `<div style="display:flex;justify-content:space-between;padding:3px 0 3px 14px;font-size:12px;color:var(--text-sub);">
+            <span>${escapeHtml(label)}</span>
+            <span>완료 ${w.done}/${w.total} <span style="color:var(--gray-text);">(누적 ${cumDone}/${cumTotal})</span></span>
+          </div>`;
+        }).join('');
+
+        return `<div style="padding:6px 0;border-bottom:0.5px solid var(--gray-border);">
+          <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 8px;font-size:13px;font-weight:600;">
+            <span style="word-break:break-word;">${escapeHtml(r.value.team)}${basinLabel}</span>
+            <span style="white-space:nowrap;margin-left:auto;">완료 ${r.value.done} / 전체 ${r.value.total}${removedNote}</span>
+          </div>
+          ${weekRows}
+        </div>`;
+      } else {
+        failedTeams.push(teams[i]);
+        console.warn('팀 현황 조회 실패:', teams[i], r.reason);
+        return `<div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 8px;padding:6px 0;border-bottom:0.5px solid var(--gray-border);font-size:13px;color:var(--danger);">
+          <span style="word-break:break-word;">${escapeHtml(teams[i])}</span>
+          <span style="white-space:nowrap;margin-left:auto;">불러오기 실패</span>
+        </div>`;
+      }
+    });
+
+    rows.push(`<div style="display:flex;justify-content:space-between;padding:8px 0;margin-top:4px;border-top:1.5px solid var(--text);font-size:13px;font-weight:700;">
+      <span>합계</span>
+      <span>완료 ${doneAll} / 전체 ${totalAll}</span>
+    </div>`);
+
+    listEl.innerHTML = rows.join('');
+    if (failedTeams.length > 0) {
+      status.style.color = 'var(--danger)';
+      status.textContent = teams.length + '개 팀 중 ' + failedTeams.length + '개 조회 실패';
+    } else {
+      status.style.color = 'var(--green-dark)';
+      status.textContent = teams.length + '개 팀 조회 완료';
+    }
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '전체 팀 현황을 불러오지 못했습니다 — 인터넷 연결을 확인해주세요.';
+    console.warn('loadTeamSummary 실패:', e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 전체 팀 현황 불러오기';
+  }
+}
+
 // ====== 포인트 불러오기 ======
 async function loadPlotPoints() {
   const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
@@ -6732,6 +6904,23 @@ function lockAdmin() {
   document.getElementById('admin-lock-box').style.display = 'flex';
   document.getElementById('admin-content').style.display = 'none';
   document.getElementById('admin-pw-error').style.display = 'none';
+}
+
+// ====== 팀별 누적 현황 비밀번호 ======
+const TEAM_SUMMARY_PW = '7119';
+function checkTeamSummaryPw() {
+  const input = document.getElementById('team-summary-pw-input');
+  const error = document.getElementById('team-summary-pw-error');
+  if (input.value === TEAM_SUMMARY_PW) {
+    document.getElementById('team-summary-lock-box').style.display = 'none';
+    document.getElementById('load-team-summary-btn').style.display = 'block';
+    error.style.display = 'none';
+    input.value = '';
+  } else {
+    error.style.display = 'inline';
+    input.value = '';
+    input.focus();
+  }
 }
 function saveSettingsAdmin() {
   const url = document.getElementById('setting-script-url-admin')?.value.trim() || '';
