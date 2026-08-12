@@ -6429,11 +6429,21 @@ function renderRecordsList() {
     return;
   }
 
-  // 업로드 상태 배지
-  function badge(ok, label) {
-    return ok
-      ? `<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:#E1F5EE;color:#0F6E56;font-weight:700;">✓ ${label} 업로드 완료</span>`
-      : `<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:#FDECEA;color:#C0392B;font-weight:700;">✗ ${label} 업로드 실패</span>`;
+  // 업로드 상태 배지 (3-state: 완료 / 실패(오류 기록 있음) / 대기 중(오류 기록 없음 —
+  // 아직 시도 전이거나, unconfirmedAttempt 상태처럼 결과가 아직 확정 안 된 경우도 포함))
+  function badge(ok, label, hasError) {
+    if (ok) {
+      return `<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:#E1F5EE;color:#0F6E56;font-weight:700;">✓ ${label} 업로드 완료</span>`;
+    }
+    if (hasError) {
+      return `<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:#FDECEA;color:#C0392B;font-weight:700;">✗ ${label} 업로드 실패</span>`;
+    }
+    return `<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--warning-bg);color:var(--warning);font-weight:700;">⏳ ${label} 대기 중</span>`;
+  }
+  // 미완료 사진들 중 실제 오류 기록이 있는 게 하나라도 있으면 true(전체 탭·사진촬영 탭 합계 배지 공용)
+  function photoHasError(r, photos) {
+    const errs = r.uploadErrors?.photos || {};
+    return photos.some(p => !p.uploaded && errs[p.filename]);
   }
 
 
@@ -6464,11 +6474,11 @@ function renderRecordsList() {
           </button>` : ''}
         </div>
         <div style="padding:10px 14px;display:flex;flex-direction:column;gap:5px;">
-          ${badge(r.soilUploaded, '입지·토양')}
-          ${treeHas ? badge(r.treeUploaded, '임목조사') : '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">임목 미입력</span>'}
+          ${badge(r.soilUploaded, '입지·토양', !!r.uploadErrors?.soil)}
+          ${treeHas ? badge(r.treeUploaded, '임목조사', !!r.uploadErrors?.tree) : '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">임목 미입력</span>'}
           ${photos.length === 0
             ? '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">사진 없음</span>'
-            : badge(photoDone, '사진 ' + photos.filter(p=>p.uploaded).length + '/' + photos.length)}
+            : badge(photoDone, '사진 ' + photos.filter(p=>p.uploaded).length + '/' + photos.length, photoHasError(r, photos))}
         </div>
         ${(() => {
           const ue = r.uploadErrors;
@@ -6520,7 +6530,7 @@ function renderRecordsList() {
           <div style="line-height:1.8;">${soilPreview || '<span style="font-size:11px;color:var(--text-sub);">데이터 없음</span>'}</div>
         </div>
         <div style="padding:8px 14px 10px;border-top:0.5px solid var(--gray-border);">
-          ${badge(r.soilUploaded, '입지·토양')}
+          ${badge(r.soilUploaded, '입지·토양', !!r.uploadErrors?.soil)}
 
         </div>
         <div style="padding:4px 14px 8px;text-align:right;">
@@ -6555,7 +6565,7 @@ function renderRecordsList() {
         </div>
         <div style="padding:8px 14px 10px;border-top:0.5px solid var(--gray-border);">
           ${treeCount > 0
-            ? badge(r.treeUploaded, '임목조사')
+            ? badge(r.treeUploaded, '임목조사', !!r.uploadErrors?.tree)
             : '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">임목 미입력</span>'}
         </div>
         <div style="padding:4px 14px 8px;text-align:right;">
@@ -6571,15 +6581,18 @@ function renderRecordsList() {
       const doneCnt = photos.filter(p => p.uploaded).length;
       const total = photos.length;
       const allDone = total > 0 && doneCnt === total;
-      const photoRows = photos.map(p =>
-        `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--gray-bg);">
+      const photoRows = photos.map(p => {
+        const err = r.uploadErrors?.photos?.[p.filename];
+        const state = p.uploaded ? 'done' : (err ? 'failed' : 'pending');
+        const style = { done: 'background:#E1F5EE;color:#0F6E56;', failed: 'background:#FDECEA;color:#C0392B;', pending: 'background:var(--warning-bg);color:var(--warning);' }[state];
+        const label = { done: '✓ 완료', failed: '✗ 실패', pending: '⏳ 대기 중' }[state];
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--gray-bg);">
           <span style="font-size:12px;color:var(--text);flex:1;word-break:break-all;">${escapeHtml(p.filename)}</span>
-          <span style="flex-shrink:0;margin-left:8px;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;
-            ${p.uploaded ? 'background:#E1F5EE;color:#0F6E56;' : 'background:#FDECEA;color:#C0392B;'}">
-            ${p.uploaded ? '✓ 완료' : '✗ 실패'}
+          <span style="flex-shrink:0;margin-left:8px;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700;${style}">
+            ${label}
           </span>
-        </div>`
-      ).join('');
+        </div>`;
+      }).join('');
       return `
       <div class="record-item" style="padding:0;overflow:hidden;">
         <button class="record-delete" onclick="deleteRecord(${r.id})" title="삭제">×</button>
@@ -6595,7 +6608,7 @@ function renderRecordsList() {
         <div style="padding:8px 14px 10px;border-top:0.5px solid var(--gray-border);">
           ${total === 0
             ? '<span style="font-size:12px;padding:3px 10px;border-radius:20px;background:var(--gray-bg);color:var(--text-sub);">사진 없음</span>'
-            : badge(allDone, '사진 ' + doneCnt + '/' + total)}
+            : badge(allDone, '사진 ' + doneCnt + '/' + total, photoHasError(r, photos))}
           ${(total > 0 && !allDone) ? `<br><button id="reupload-btn-${r.id}" onclick="reuploadRecord(${r.id})" ${reuploadDisabled}>
             ${reuploadLabel}
           </button>` : ''}
