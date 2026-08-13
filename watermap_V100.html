@@ -1973,7 +1973,7 @@ async function restoreDraft(plotNo) {
     // 사진 썸네일 복원 (IndexedDB에서) — 원본(idbOrigKey) 우선, 없으면 captureId 일치할 때만 보조 캐시로 폴백
     if (draft._photoKeys || draft._movePhotoKeys) {
       const _records = getSurveyRecords();
-      const _existingRec2 = _records.find(r => r.plotNo === plotNo);
+      const _existingRec2 = _records.find(r => r && r.plotNo === plotNo);
       var _existingPhotoMap = {};
       (_existingRec2?.photoList || []).forEach(p => { _existingPhotoMap[p.filename] = p; });
     }
@@ -2108,7 +2108,7 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
     // onlyNew=false(최초 업로드): 전체 원본 ZIP
     // 원본(idbOrigKey/idbMoveOrigKey) 우선, 없으면 captureId 일치할 때만 보조 캐시로 폴백
     const _zipRecords = getSurveyRecords();
-    const _zipExistingRec = _zipRecords.find(r => r.plotNo === plotNo);
+    const _zipExistingRec = _zipRecords.find(r => r && r.plotNo === plotNo);
     const _zipExistingPhotoMap = {};
     (_zipExistingRec?.photoList || []).forEach(p => { _zipExistingPhotoMap[p.filename] = p; });
     // 일반 사진 (12장)
@@ -2180,7 +2180,7 @@ function clearDraft() {
 // ====== 저장된 조사지 불러오기 ======
 function loadRecord(id) {
   const records = getSurveyRecords();
-  const rec = records.find(r => r.id === id);
+  const rec = records.find(r => r && r.id === id);
   if (!rec) return;
 
   // 현재 작업중인 내용이 있으면 확인
@@ -3026,7 +3026,7 @@ function manualSendAll() {
 // id 기준으로 찾는다 — plotNo보다 안정적인 키.
 function patchRecord(id, patchFn) {
   const recs = getSurveyRecords();
-  const idx = recs.findIndex(r => r.id === id);
+  const idx = recs.findIndex(r => r && r.id === id);
   if (idx !== -1) {
     patchFn(recs[idx]);
     localStorage.setItem('survey_records', JSON.stringify(recs));
@@ -3050,7 +3050,7 @@ function refreshSynced(rec) {
 // 다른 탭에서 그 사이 변경된 내용을 반영할 수 있다.
 function freshRecord(recordId) {
   const recs = getSurveyRecords();
-  return recs.find(r => r.id === recordId);
+  return recs.find(r => r && r.id === recordId);
 }
 
 // 객체/배열을 재귀적으로 키 정렬해 직렬화 — 필드 나열 순서가 흔들려도 항상 같은 문자열을 보장한다
@@ -3295,7 +3295,7 @@ async function autoRetryUpload() {
   const scriptUrl = localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
   if (!scriptUrl) return;
 
-  const records = getSurveyRecords();
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
   const incomplete = records.filter(r => {
     const photosDone = !r.photoList || r.photoList.length === 0 || r.photoList.every(p => p.uploaded);
     return (!r.soilUploaded || !isTreeComplete(r) || !photosDone) && !deselectedRecordIds.has(r.id);
@@ -3488,7 +3488,7 @@ async function autoRetryUpload() {
       try {
         const finalRecordsForCleanup = getSurveyRecords();
         doneRecordIds.forEach(rid => {
-          const r = finalRecordsForCleanup.find(x => x.id === rid);
+          const r = finalRecordsForCleanup.find(x => x && x.id === rid);
           (r?.photoList || []).forEach(p => {
             const s = resolvePhotoSlot(r.plotNo, p.filename);
             if (s) idbDelete(s.cacheKey).catch(error => console.warn('업로드 완료 후 임시 캐시 삭제 실패:', error));
@@ -3505,7 +3505,7 @@ async function autoRetryUpload() {
     if (successCount > 0) {
       try {
         let dropdownFailed = false;
-        const successPlots = getSurveyRecords().filter(r => r.soilUploaded).map(r => r.plotNo);
+        const successPlots = getSurveyRecords().filter(r => r && r.soilUploaded).map(r => r.plotNo);
         successPlots.forEach(pn => {
           if (markPlotDoneInDropdown(pn).status === 'failed') dropdownFailed = true;
         });
@@ -3574,13 +3574,15 @@ async function flushOfflineQueue() {
   const records = getSurveyRecords();
   let changed = false;
   records.forEach((r, idx) => {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return; // null뿐 아니라 문자열·숫자·배열 같은 truthy 비객체도 걸러냄
     const pn = r.plotNo;
-    if (succeededSoil.has(pn))  { records[idx].soilUploaded = true; changed = true; }
-    if (succeededTree.has(pn))  { records[idx].treeUploaded = true; changed = true; }
+    if (succeededSoil.has(pn))  { records[idx].soilUploaded = true; ensureUploadErrors(records[idx]).soil = null; changed = true; }
+    if (succeededTree.has(pn))  { records[idx].treeUploaded = true; ensureUploadErrors(records[idx]).tree = null; changed = true; }
     if (succeededPhoto[pn] && records[idx].photoList) {
       records[idx].photoList = records[idx].photoList.map(p =>
         succeededPhoto[pn].has(p.filename) ? { ...p, uploaded: true } : p
       );
+      succeededPhoto[pn].forEach(fn => { delete ensureUploadErrors(records[idx]).photos[fn]; });
       changed = true;
     }
     // 전체 완료 여부 재계산
@@ -3786,7 +3788,7 @@ async function saveData() {
 
   // 로컬 저장 — 같은 조사지번호 있으면 바로 덮어쓰기
   const records = getSurveyRecords();
-  const existingIdx = records.findIndex(r => r.plotNo === plotNo);
+  const existingIdx = records.findIndex(r => r && r.plotNo === plotNo);
   const existingRec2 = existingIdx !== -1 ? records[existingIdx] : null;
 
   // 수정 모드: X, Y 좌표는 기존 현장 좌표 유지 (숙소에서 수정 시 좌표 변경 방지)
@@ -3921,7 +3923,7 @@ async function saveData() {
   let hasNewPhotos = false;
   {
     const recordsH = getSurveyRecords();
-    const existingRecH = recordsH.find(r => r.plotNo === plotNo);
+    const existingRecH = recordsH.find(r => r && r.plotNo === plotNo);
     const existingPhotoMapH = {};
     (existingRecH?.photoList || []).forEach(p => { existingPhotoMapH[p.filename] = p; });
 
@@ -4946,7 +4948,7 @@ async function deleteMovePhotoSlot(i) {
   const _delMovePlotNo = document.getElementById('soil-plot-no')?.value || '';
   const _delMoveFilename = _delMovePlotNo + '(' + MOVE_PHOTO_SLOTS[i] + ').jpg';
   const _delMoveRecords = getSurveyRecords();
-  const _delMoveExistingRec = _delMoveRecords.find(r => r.plotNo === _delMovePlotNo);
+  const _delMoveExistingRec = _delMoveRecords.find(r => r && r.plotNo === _delMovePlotNo);
   const _delMoveItem = _delMoveExistingRec?.photoList?.find(p => p.filename === _delMoveFilename);
   if (_delMoveItem?.uploaded) {
     if (!confirm('이미 업로드된 사진입니다.\n\n' + MOVE_PHOTO_SLOTS_LABEL[i] + '\n\n※ 기기 목록에서만 제거됩니다. 관리자 취합 데이터와 Drive의 기존 파일은 삭제되지 않습니다.\n※ 수정이 목적이라면 삭제 대신 같은 슬롯을 다시 촬영해 전송하는 것을 권장합니다.\n\n삭제하시겠습니까?')) return;
@@ -5136,7 +5138,7 @@ async function deletePhoto(idx) {
   const _delPlotNo = document.getElementById('soil-plot-no')?.value || '';
   const filename = _delPlotNo + '(' + PHOTO_SLOTS[idx] + ').jpg';
   const _delRecords = getSurveyRecords();
-  const _delExistingRec = _delRecords.find(r => r.plotNo === _delPlotNo);
+  const _delExistingRec = _delRecords.find(r => r && r.plotNo === _delPlotNo);
   const _delItem = _delExistingRec?.photoList?.find(p => p.filename === filename);
   if (_delItem?.uploaded) {
     if (!confirm('이미 업로드된 사진입니다.\n\n' + PHOTO_SLOTS[idx] + '\n\n※ 기기 목록에서만 제거됩니다. 관리자 취합 데이터와 Drive의 기존 파일은 삭제되지 않습니다.\n※ 수정이 목적이라면 삭제 대신 같은 슬롯을 다시 촬영해 전송하는 것을 권장합니다.\n\n삭제하시겠습니까?')) return;
@@ -6444,7 +6446,7 @@ function escapeHtml(s) {
 // 미완료 건수 계산 + 선택 전송 버튼 갱신. 체크박스 하나만 토글할 때는 목록 전체를
 // 다시 그리지 않고 이 함수만 불러서 스크롤 위치·다른 카드 상태를 건드리지 않는다.
 function updateSendAllBar() {
-  const records = getSurveyRecords();
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
   const incompleteRecs = records.filter(r => {
     const photosDone = !r.photoList || r.photoList.length === 0 || r.photoList.every(p => p.uploaded);
     return !r.soilUploaded || !isTreeComplete(r) || !photosDone;
@@ -6487,7 +6489,7 @@ function toggleSelectAll(checked) {
   if (checked) {
     deselectedRecordIds.clear();
   } else {
-    const records = getSurveyRecords();
+    const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
     records.forEach(r => {
       const photosDone = !r.photoList || r.photoList.length === 0 || r.photoList.every(p => p.uploaded);
       if (!r.soilUploaded || !isTreeComplete(r) || !photosDone) deselectedRecordIds.add(r.id);
@@ -6499,7 +6501,7 @@ function toggleSelectAll(checked) {
 }
 
 function renderRecordsList() {
-  const records = getSurveyRecords();
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
   const container = document.getElementById('records-list');
   updateSendAllBar();
 
@@ -6711,7 +6713,7 @@ function renderRecordsList() {
 // ====== 재업로드 ======
 async function reuploadRecord(id) {
   const records = getSurveyRecords();
-  const rec = records.find(r => r.id === id);
+  const rec = records.find(r => r && r.id === id);
   if (!rec) return;
   if (_isUploading) { showToast('⏳ 업로드 진행 중입니다. 잠시 후 다시 시도해주세요', 'info'); return; }
   if (!navigator.onLine) { showToast('📵 오프라인 상태입니다. 인터넷 연결 후 다시 시도해주세요', 'error'); return; }
@@ -6933,7 +6935,7 @@ async function reuploadRecord(id) {
 // ====== 레코드 삭제 ======
 function deleteRecord(id) {
   const records = getSurveyRecords();
-  const target = records.find(r => r.id === id);
+  const target = records.find(r => r && r.id === id);
   if (!target) return;
   const label = '표준지 ' + target.plotNo + ' (' + (target.date || '날짜 미입력') + ')';
   if (!confirm('삭제하시겠습니까?\n\n' + label + '\n\n※ 기기에서만 삭제됩니다. 이미 업로드된 데이터는 Google Sheets에 그대로 남아있습니다.')) return;
@@ -6951,7 +6953,7 @@ function deleteRecord(id) {
     idbDelete(idbMoveViewKey(pn, i)).catch(() => {});
   }
 
-  const updated = records.filter(r => r.id !== id);
+  const updated = records.filter(r => !r || r.id !== id);
   localStorage.setItem('survey_records', JSON.stringify(updated));
   deselectedRecordIds.delete(id); // 삭제된 레코드의 해제 기록은 남겨둘 이유가 없음
   renderRecordsList();
@@ -6967,7 +6969,7 @@ function csvSafeCell(v) {
   return '"' + s + '"';
 }
 function exportCSV(type) {
-  const records = getSurveyRecords();
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
   if (records.length === 0) { showToast('저장된 데이터가 없습니다', 'error'); return; }
 
   let csv = '';
