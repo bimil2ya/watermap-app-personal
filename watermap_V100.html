@@ -32,6 +32,32 @@ if ('serviceWorker' in navigator) {
       .catch(function(err) { console.log('SW 등록 실패:', err); });
   });
 }
+
+// ====== 전역 오류 안전망 ======
+// 여기서 잡히는 건 전부 "다른 어디서도 처리하지 않은" 경우다 — 개별 기능의
+// 오류 처리(try/catch, .catch() 등)를 대체하지 않고, 그게 빠진 곳에서 조용히
+// 사라지던 예외/거부를 최소한 콘솔+토스트로 드러나게 하는 마지막 그물이다.
+// showToast는 이 스크립트 블록보다 뒤에 정의되지만, 아래는 리스너 "등록"일
+// 뿐이고 실제 콜백은 그 정의가 끝난 뒤(사용자가 조작을 시작한 뒤)에나
+// 호출되므로 순서 문제가 없다 — 다만 아주 이른 시점(로드 직후) 예외까지
+// 대비해 typeof 체크를 둔다.
+let _lastGlobalErrorToastAt = 0;
+function _notifyGlobalError() {
+  const now = Date.now();
+  if (now - _lastGlobalErrorToastAt < 5000) return; // 5초 내 반복 발생 시 토스트 스팸 방지
+  _lastGlobalErrorToastAt = now;
+  if (typeof showToast === 'function') {
+    showToast('⚠️ 예상치 못한 오류가 발생했습니다', 'error');
+  }
+}
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('처리되지 않은 Promise 거부:', e.reason);
+  _notifyGlobalError();
+});
+window.addEventListener('error', function(e) {
+  console.error('처리되지 않은 오류:', e.error || e.message);
+  _notifyGlobalError();
+});
 </script>
 <style>
 /* ===== 50~70대 사용자 최적화 UI ===== */
@@ -4255,13 +4281,16 @@ function handleMovePhoto(event, i) {
       movePhotoData[i] = { filename };
       // 슬롯 썸네일 + 뷰어용 이미지 동시 저장
       const _plotNoForMoveThumb = plotNo;
+      // _photoProcessing 해제는 이 Promise.all과 무관한 아래 thumbImg.onload/onerror가
+      // 담당하므로 여기 실패가 잠금을 막지는 않지만, unhandled rejection으로 조용히
+      // 사라지지 않도록 최소한 로그는 남긴다.
       Promise.all([
         makeMicroThumb(base64m, false),
         makeViewThumb(base64m, false)
       ]).then(([ts, vs]) => {
         if (ts) idbSet(idbMoveThumbKey(_plotNoForMoveThumb, i), { base64: ts.split(',')[1], filename }).catch(console.error);
         if (vs) idbSet(idbMoveViewKey(_plotNoForMoveThumb, i),  { base64: vs.split(',')[1], filename }).catch(console.error);
-      });
+      }).catch(err => console.error('이동사진 썸네일 생성 실패:', err));
       saveDraft(); // 사진 저장 직후 즉시 draft 저장
 
       // 썸네일 작은 크기로 별도 생성
@@ -4961,7 +4990,7 @@ async function deleteMovePhotoSlot(i) {
     _delMoveOps.push(idbDelete(idbMoveThumbKey(_delMovePlotNo, i)));
     _delMoveOps.push(idbDelete(idbMoveViewKey(_delMovePlotNo, i)));
   }
-  await Promise.allSettled(_delMoveOps);
+  const _delMoveResults = await Promise.allSettled(_delMoveOps);
   const slot = document.getElementById('photo-move-slot-' + i);
   if (slot) {
     slot.className = 'photo-slot landscape-slot';
@@ -4981,7 +5010,16 @@ async function deleteMovePhotoSlot(i) {
     slot.appendChild(txt);
   }
   saveDraft(); // 사진 삭제 직후 즉시 draft 저장
-  showToast('이동사진 삭제됨', 'info');
+  // 화면·메모리(movePhotoData)는 이미 비웠지만, IDB 삭제 자체가 실패했으면 캐시가
+  // 남아있다가 나중에 이 조사지를 다시 불러올 때(_restoreRecordData) 그 남은 캐시를
+  // 읽어서 방금 지운 사진이 되살아날 수 있다 — 화면은 그대로 비운 채(사용자 의도
+  // 존중), 이 잔여 위험만 명확히 알린다.
+  if (_delMoveResults.some(r => r.status === 'rejected')) {
+    console.warn('이동사진 삭제 중 일부 실패:', _delMoveResults.filter(r => r.status === 'rejected').map(r => r.reason));
+    showToast('이동사진을 화면에서 지웠지만 일부 삭제가 완료되지 않았습니다 — 다시 불러오면 재등장할 수 있습니다', 'error');
+  } else {
+    showToast('이동사진 삭제됨', 'info');
+  }
 }
 
 function triggerPhoto(idx) {
@@ -5116,6 +5154,16 @@ function handlePhoto(event, idx, fromCamera) {
         if (fromCamera && wasEmptyBeforeThisShot) advanceToNextPhotoSlot(idx);
         clearTimeout(_safetyTimer);
         _photoProcessing = false;
+      }).catch(err => {
+        // 원본(idbOrigKey)은 이미 위에서 저장 성공했으므로 사진 자체는 안전하다 —
+        // 여기서 실패한 건 썸네일 생성·화면 갱신뿐이라 "저장은 됐지만 화면 표시에
+        // 문제가 있었다"고 정확히 안내한다("다시 촬영"은 원본이 없을 때만 맞는 말).
+        // .catch() 없이 두면 이 예외가 unhandled로 사라지면서, 잠금 해제가 이
+        // then() 콜백 끝에만 있어 _photoProcessing이 영원히 true로 남을 위험이 있었다.
+        console.error('사진 후처리(썸네일/화면 갱신) 실패:', err);
+        clearTimeout(_safetyTimer);
+        _photoProcessing = false;
+        showToast('사진은 저장됐지만 화면 갱신에 실패했습니다 — 다른 조사지로 이동했다가 돌아와 확인해주세요', 'error');
       });
 
     } catch(err) {
@@ -5152,22 +5200,37 @@ async function deletePhoto(idx) {
     _delOps.push(idbDelete(idbThumbKey(_delPlotNo, idx)));
     _delOps.push(idbDelete(idbViewKey(_delPlotNo, idx)));
   }
-  await Promise.allSettled(_delOps);
+  const _delResults = await Promise.allSettled(_delOps);
   const slot = document.getElementById('photo-slot-' + idx);
-  slot.innerHTML = '';
-  slot.style.cursor = 'pointer';
-  slot.onclick = () => openPhotoSheet('empty', 'photo', idx, PHOTO_SLOTS_LABEL[idx]);
+  if (slot) {
+    slot.innerHTML = '';
+    slot.style.cursor = 'pointer';
+    slot.onclick = () => openPhotoSheet('empty', 'photo', idx, PHOTO_SLOTS_LABEL[idx]);
 
-  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
-  svg.setAttribute('viewBox','0 0 24 24');
-  svg.innerHTML = '<circle cx="12" cy="13" r="4"/><path d="M5 7H3a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2l-2-3H9L7 7z"/>';
-  slot.appendChild(svg);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.innerHTML = '<circle cx="12" cy="13" r="4"/><path d="M5 7H3a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2l-2-3H9L7 7z"/>';
+    slot.appendChild(svg);
 
-  const txt = document.createElement('span');
-  txt.textContent = '촬영하기';
-  slot.appendChild(txt);
+    const txt = document.createElement('span');
+    txt.textContent = '촬영하기';
+    slot.appendChild(txt);
+  }
 
-  showToast('사진 삭제됨: ' + PHOTO_SLOTS[idx], 'info');
+  saveDraft(); // 사진 삭제 직후 즉시 draft 저장(deleteMovePhotoSlot과 동일하게 통일 —
+               // 이게 없으면 삭제 후 저장 전에 새로고침될 때 draft가 삭제 이전 상태로
+               // 남아있어 방금 지운 사진이 되살아날 수 있었다)
+
+  // 화면·메모리(photoData)는 이미 비웠지만, IDB 삭제 자체가 실패했으면 캐시가 남아있다가
+  // 나중에 이 조사지를 다시 불러올 때(_restoreRecordData) 그 남은 캐시를 읽어서 방금
+  // 지운 사진이 되살아날 수 있다 — 화면은 그대로 비운 채(사용자 의도 존중), 이 잔여
+  // 위험만 명확히 알린다.
+  if (_delResults.some(r => r.status === 'rejected')) {
+    console.warn('사진 삭제 중 일부 실패:', _delResults.filter(r => r.status === 'rejected').map(r => r.reason));
+    showToast('사진을 화면에서 지웠지만 일부 삭제가 완료되지 않았습니다 — 다시 불러오면 재등장할 수 있습니다', 'error');
+  } else {
+    showToast('사진 삭제됨: ' + PHOTO_SLOTS[idx], 'info');
+  }
 }
 // ====== 팀 관리 (구글 시트 기반) ======
 // loaded_plots/cached_teams는 서버 응답을 그대로 캐시한 값이라 형식이 깨질 수 있다.
@@ -6081,8 +6144,11 @@ function _restoreRecordData(rec) {
     const MOVE_SLOTS = ['N_기존현황','E_기존현황','S_기존현황','W_기존현황'];
     const pn = rec.plotNo || '';
 
-    // 일반 사진 12장 병렬 복원
-    Promise.all(SLOTS.map(async (slotName, idx) => {
+    // 일반 사진 12장 병렬 복원 — allSettled를 써서 슬롯 하나의 IDB 실패가 나머지
+    // 슬롯 복원이나 사용자 안내를 막지 않게 한다(Promise.all이었다면 실패 자체는
+    // 개별 슬롯 처리를 막지 않지만, 그 실패가 아무도 안 받는 unhandled rejection으로
+    // 조용히 사라져 "왜 이 사진만 안 보이지"를 사용자가 알 방법이 없었다).
+    const photoRestore = Promise.allSettled(SLOTS.map(async (slotName, idx) => {
       const expectedFilename = pn + '(' + slotName + ').jpg';
       if (!rec.photoList.find(p => p.filename === expectedFilename)) return;
       // 썸네일 키 우선, 없으면 원본으로 폴백(미리보기가 커지지만 표시는 문제없음), 그것도 없으면 captureId 일치할 때만 보조 캐시
@@ -6117,8 +6183,8 @@ function _restoreRecordData(rec) {
       slot.onclick = () => openPhotoSheet('filled', 'photo', idx, slotName);
     }));
 
-    // 이동사진 4장 병렬 복원
-    Promise.all(MOVE_SLOTS.map(async (slotName, idx) => {
+    // 이동사진 4장 병렬 복원 (동일한 이유로 allSettled)
+    const movePhotoRestore = Promise.allSettled(MOVE_SLOTS.map(async (slotName, idx) => {
       const expectedFilename = pn + '(' + slotName + ').jpg';
       if (!rec.photoList.find(p => p.filename === expectedFilename)) return;
       let stored = await idbGet(idbMoveThumbKey(pn, idx));
@@ -6149,6 +6215,16 @@ function _restoreRecordData(rec) {
       slot.style.cursor = 'pointer';
       slot.onclick = () => openPhotoSheet('filled', 'move', idx, slotName);
     }));
+
+    // 두 그룹을 합쳐 실패 건수를 세고, 있으면 콘솔 로그 + 사용자 안내(무엇이 왜
+    // 안 보이는지 전혀 알 수 없던 기존 상태를 벗어난다).
+    Promise.all([photoRestore, movePhotoRestore]).then(([photoResults, moveResults]) => {
+      const failed = [...photoResults, ...moveResults].filter(r => r.status === 'rejected');
+      if (failed.length > 0) {
+        console.warn('사진 슬롯 복원 중 ' + failed.length + '건 실패:', failed.map(r => r.reason));
+        showToast('⚠️ 사진 ' + failed.length + '장을 불러오지 못했습니다 — 다른 조사지로 이동했다가 다시 열어봐도 안 보이면 재촬영해주세요', 'error');
+      }
+    });
   }
   syncAllQuickPickHighlights();
   syncAllPickerTriggers();
