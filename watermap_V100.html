@@ -99,16 +99,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun G
 .topbar-icon { width: 38px; height: 38px; background: rgba(255,255,255,0.2); border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .topbar-icon svg { width: 22px; height: 22px; stroke: white; fill: none; stroke-width: 2; }
 .topbar h1 { font-size: 20px; font-weight: 700; color: white; flex: 1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.version-badge { display: inline-block; font-size: 12px; font-weight: 700; background: #E24B4A; color: #FFEB3B; padding: 3px 9px; border-radius: 20px; }
+/* "경호버전" 배지 자체가 조사 현황 대시보드로 가는 링크를 겸한다 —
+   별도 아이콘 버튼을 헤더에 추가했더니 너무 복잡해 보여 제거하고 이쪽으로 통합 */
+.version-badge {
+  display: inline-block; font-size: 12px; font-weight: 700; background: #E24B4A; color: #FFEB3B;
+  padding: 3px 9px; border-radius: 20px; text-decoration: none; cursor: pointer;
+}
 .topbar-badge { font-size: 13px; padding: 5px 10px; border-radius: 20px; font-weight: 700; }
 .badge-ok { background: #A8E6D0; color: #0A5C45; }
 .badge-warn { background: var(--warning-bg); color: var(--warning); }
-.dashboard-link-btn {
-  width: 34px; height: 34px; background: rgba(255,255,255,0.2); border-radius: 10px;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-  font-size: 18px; text-decoration: none; line-height: 1;
+
+/* 매우 좁은 화면(iPhone SE 1세대급, 320px)에서 헤더가 줄바꿈되는 것을 완화 */
+@media (max-width: 340px) {
+  .topbar { padding: 12px 12px; gap: 8px; }
+  .topbar h1 { font-size: 17px; gap: 5px; }
+  .topbar-icon { width: 30px; height: 30px; }
+  .topbar-badge, .version-badge { font-size: 11px; padding: 3px 7px; }
 }
-.dashboard-link-btn:active { background: rgba(255,255,255,0.35); }
 
 /* 탭 네비게이션 - 크고 굵게 */
 .nav { display: flex; background: var(--white); border-bottom: 2px solid var(--gray-border); overflow-x: auto; scrollbar-width: none; }
@@ -479,8 +486,7 @@ body.dark-mode #tab-tree table td:first-child {
   <div class="topbar-icon">
     <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
   </div>
-  <h1>산림 물지도 야장 <span class="version-badge">경호버전</span></h1>
-  <a href="dashboard.html" target="_blank" rel="noopener" class="dashboard-link-btn" title="조사 현황 대시보드">📍</a>
+  <h1>산림 물지도 야장 <a href="dashboard.html" target="_blank" rel="noopener" class="version-badge" title="조사 현황 대시보드">경호버전</a></h1>
   <span class="topbar-badge badge-ok" id="gps-badge">GPS 대기</span>
 </div>
 
@@ -4072,6 +4078,10 @@ function sendToScriptSafe(scriptUrl, payload) {
     body: JSON.stringify(payload)
   }, 45000).then(function(r) { return r.json(); }).catch(function() { return { status: 'ok' }; });
 }
+// ⚠️ 동기화 주의: dashboard.html의 epsg5186ToWgs84()가 이 함수의 역변환이다.
+// 두 파일은 빌드 시스템 없는 독립 정적 HTML이라 상수를 공유할 수 없으므로,
+// 아래 상수(a, f, lat0/lng0, k0, FE, FN)를 고치면 dashboard.html에도 반드시
+// 동일하게 반영해야 한다 — 한쪽만 바뀌면 두 화면의 지도 마커 위치가 어긋난다.
 function wgs84ToEpsg5186(lat, lng) {
   const deg2rad = Math.PI / 180;
   const a = 6378137.0;

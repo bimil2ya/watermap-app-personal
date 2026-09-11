@@ -131,6 +131,7 @@ body {
   background: none; border: 1.5px solid var(--green-mid); color: var(--white); border-radius: var(--radius-sm);
   padding: 6px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer; flex-shrink: 0;
 }
+.refresh-btn:disabled { opacity: 0.5; cursor: default; }
 .loading-note { text-align: center; padding: 40px 20px; color: var(--text-sub); font-size: 15px; }
 .error-note {
   text-align: center; padding: 20px; color: var(--danger); background: var(--danger-bg);
@@ -261,6 +262,12 @@ function checkPin() {
 // EPSG5186(GRS80, 중부원점 TM) ↔ WGS84 좌표 변환
 // watermap_V100.html의 wgs84ToEpsg5186()와 짝을 이루는 역변환 —
 // 표준 TM 역변환 공식(Snyder, Map Projections: A Working Manual 기준)을 그대로 구현.
+//
+// ⚠️ 동기화 주의: 이 파일과 watermap_V100.html은 빌드 시스템이 없는 완전히
+// 독립된 정적 HTML이라 상수(a, f, lat0/lng0, k0, FE, FN)를 공유할 수 없다.
+// 아래 값을 고치면(예: 타원체·중부원점 재조정) watermap_V100.html의
+// wgs84ToEpsg5186()에도 반드시 동일하게 반영해야 한다 — 한쪽만 바뀌면
+// 두 화면의 지도 마커가 서로 다른 위치에 표시된다.
 // ============================================================
 function epsg5186ToWgs84(x, y) {
   const deg2rad = Math.PI / 180;
@@ -385,31 +392,86 @@ function isDone(p) {
   return d === '완료' || d === 'O' || d === 'Y';
 }
 
+// watermap_V100.html의 normalizeLoadedPlots()/normalizeCachedTeams()와 동일한 규칙 —
+// 서버가 malformed 항목(plotNo 없는 객체, null 등)을 섞어 보내도 화면이 깨지지 않게
+// 걸러내고, "정상적으로 빈 배열"과 "응답 형식 자체가 이상해서 비어버린 경우"를 구분한다.
+function normalizePlots(list) {
+  const wasArray = Array.isArray(list);
+  const source = wasArray ? list : [];
+  const items = source
+    .filter(p => p !== null && typeof p === 'object' && !Array.isArray(p)
+      && typeof p.plotNo === 'string' && p.plotNo.trim() !== '')
+    .map(p => ({ ...p, plotNo: p.plotNo.trim() }));
+  return { items, removedCount: source.length - items.length, wasArray, originalLength: source.length };
+}
+function normalizeTeams(list) {
+  const wasArray = Array.isArray(list);
+  const source = wasArray ? list : [];
+  const items = source.filter(t => typeof t === 'string' && t.trim() !== '').map(t => t.trim());
+  return { items, removedCount: source.length - items.length, wasArray, originalLength: source.length };
+}
+
 let allTeamsData = []; // [{ team, plots: [...] }]
 let currentMap = null;
 let currentMarkers = [];
+let currentInfoWindow = null; // 한 번에 하나만 열리도록 — 새 마커 클릭 시 이전 것을 닫는다
+
+// watermap_V100.html의 모든 호출부와 동일한 규칙 — 관리자가 설정 탭에서
+// 지정한 script_url이 있으면 우선한다(loadAll()과 openMap()이 함께 쓰도록 공용화).
+function getScriptUrl() {
+  return localStorage.getItem('script_url') || MASTER_SCRIPT_URL;
+}
+
+// "2026-09-09T15:00:00.000Z" 같은 ISO 문자열(Google Sheets 날짜 셀이
+// Apps Script를 거쳐 JSON 직렬화된 값)을 "9/10(목)"처럼 표시한다.
+// new Date(...)의 로컬(비-UTC) getter를 쓰므로 브라우저가 한국 시간대일 때
+// 정확하다 — 이 앱은 국내 산림 조사팀 전용이라 그 전제가 항상 성립한다.
+function formatKoreanDate(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+  return `${d.getMonth() + 1}/${d.getDate()}(${weekdays[d.getDay()]})`;
+}
 
 async function loadAll(isManualRefresh) {
   const loadingNote = document.getElementById('loading-note');
   const errorNote = document.getElementById('error-note');
   const overviewCard = document.getElementById('overview-card');
   const teamListCard = document.getElementById('team-list-card');
+  const refreshBtn = document.getElementById('refresh-btn');
 
   errorNote.hidden = true;
   loadingNote.hidden = false;
+  refreshBtn.disabled = true; // 로딩 중 연타로 요청이 중복 발생하지 않도록
   if (!isManualRefresh) {
     overviewCard.hidden = true;
     teamListCard.hidden = true;
   }
 
   try {
-    const teamsData = await fetchJson(MASTER_SCRIPT_URL + '?action=getTeams');
-    const teams = Array.isArray(teamsData.teams) ? teamsData.teams.filter(t => typeof t === 'string' && t.trim()) : [];
+    const scriptUrl = getScriptUrl();
 
-    const results = await Promise.allSettled(teams.map(async team => {
-      const data = await fetchJson(MASTER_SCRIPT_URL + '?action=getPlots&team=' + encodeURIComponent(team));
-      const plots = Array.isArray(data.plots) ? data.plots : [];
-      return { team, plots };
+    const teamsData = await fetchJson(scriptUrl + '?action=getTeams');
+    const teamsNorm = normalizeTeams(teamsData.teams);
+
+    if (teamsNorm.items.length === 0) {
+      allTeamsData = [];
+      renderOverview(allTeamsData);
+      renderTeamList(allTeamsData);
+      // "정상적으로 팀이 없음"과 "응답 형식 자체가 이상해서 비어버림"을 구분 —
+      // 구분 없이 조용히 0건으로 보이면 백엔드 오류를 "아직 조사 안 함"으로 오인하게 된다.
+      if (!(teamsNorm.wasArray && teamsNorm.originalLength === 0)) {
+        errorNote.textContent = '팀 목록 응답 형식이 올바르지 않습니다 — 관리자에게 문의해주세요.';
+        errorNote.hidden = false;
+      }
+      return;
+    }
+
+    const results = await Promise.allSettled(teamsNorm.items.map(async team => {
+      const data = await fetchJson(scriptUrl + '?action=getPlots&team=' + encodeURIComponent(team));
+      const plotsNorm = normalizePlots(data.plots);
+      return { team, plots: plotsNorm.items, removedCount: plotsNorm.removedCount };
     }));
 
     const failed = results.filter(r => r.status === 'rejected');
@@ -418,8 +480,16 @@ async function loadAll(isManualRefresh) {
     renderOverview(allTeamsData);
     renderTeamList(allTeamsData);
 
+    const messages = [];
     if (failed.length > 0) {
-      errorNote.textContent = `${failed.length}개 팀의 데이터를 불러오지 못했습니다(다른 팀은 정상 표시). 새로고침을 눌러 다시 시도해보세요.`;
+      messages.push(`${failed.length}개 팀의 데이터를 불러오지 못했습니다(다른 팀은 정상 표시). 새로고침을 눌러 다시 시도해보세요.`);
+    }
+    const totalRemoved = allTeamsData.reduce((sum, t) => sum + (t.removedCount || 0), 0);
+    if (totalRemoved > 0) {
+      messages.push(`형식이 올바르지 않은 표준지 ${totalRemoved}건은 집계에서 제외했습니다.`);
+    }
+    if (messages.length > 0) {
+      errorNote.textContent = messages.join(' ');
       errorNote.hidden = false;
     }
   } catch (err) {
@@ -430,6 +500,7 @@ async function loadAll(isManualRefresh) {
     teamListCard.hidden = true;
   } finally {
     loadingNote.hidden = true;
+    refreshBtn.disabled = false;
   }
 }
 
@@ -529,6 +600,37 @@ function escapeHtml(s) {
 // ============================================================
 // 지도 표시
 // ============================================================
+
+// 완료일(=현장조사 시트의 "조사일") 조회 — getPlots에는 없고 조사지번호별
+// 개별 조회(getSurveyData)로만 얻을 수 있어, 완료된 포인트마다 하나씩 호출한다.
+// 실패해도(네트워크 오류, 그 사이 데이터가 삭제됨 등) 완료일 없이 "완료"만
+// 보여주면 되므로 조용히 null을 반환한다.
+async function fetchCompletionDate(scriptUrl, plotNo) {
+  try {
+    const data = await fetchJson(scriptUrl + '?action=getSurveyData&plotNo=' + encodeURIComponent(plotNo));
+    if (!data || !Array.isArray(data.soilRow)) return null;
+    return formatKoreanDate(data.soilRow[3]); // soilRow[3] = 조사일
+  } catch (e) {
+    return null;
+  }
+}
+
+function buildInfoContent(plot, pos, done, completionDateLabel) {
+  // 카카오맵 공식 공유 링크 — 모바일에서 카카오맵 앱이 설치돼 있으면
+  // 자동으로 앱을 열고, 없으면 카카오맵 웹으로 연다(카카오 측에서
+  // 이 딥링크 전환을 처리하므로 앱 URL 스킴을 직접 다룰 필요가 없다).
+  const kakaoMapUrl = 'https://map.kakao.com/link/map/'
+    + encodeURIComponent(plot.plotNo || '조사지') + ',' + pos.lat + ',' + pos.lng;
+  const statusLine = done
+    ? '✅ 완료' + (completionDateLabel ? ' · ' + escapeHtml(completionDateLabel) : ' · <span style="color:#999;">조회 중...</span>')
+    : '⏳ 미완료';
+  return `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
+    <b>${escapeHtml(plot.plotNo || '')}</b>
+    ${plot.basin ? ' · ' + escapeHtml(plot.basin) : ''}
+    <br>${statusLine}
+    <br><a href="${kakaoMapUrl}" target="_blank" rel="noopener" style="color:#1D9E75;font-weight:700;">📍 카카오맵 앱에서 보기</a>
+  </div>`;
+}
 async function openMap(team, plots) {
   const key = getKakaoKey();
   if (!key) {
@@ -570,17 +672,26 @@ async function openMap(team, plots) {
     currentMarkers.forEach(m => m.setMap(null));
     currentMarkers = [];
   }
+  currentInfoWindow = null; // 팀을 바꾸면 이전 팀의 정보창 참조도 함께 정리
 
   if (located.length === 0) {
+    currentMap = null; // 다음에 위치가 있는 팀을 열 때 지도를 새로 만들어야 하므로 참조를 버린다
     mapEl.innerHTML = '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
     return;
   }
-  mapEl.innerHTML = '';
 
   const center = new kakao.maps.LatLng(located[0].pos.lat, located[0].pos.lng);
-  currentMap = new kakao.maps.Map(mapEl, { center, level: 8 });
+  if (currentMap) {
+    // 이미 지도가 떠 있으면(팀 전환) 재사용 — 매번 새로 만들면 반복 전환 시
+    // 불필요한 재초기화로 저사양 기기에서 끊김이 생긴다.
+    currentMap.setCenter(center);
+  } else {
+    mapEl.innerHTML = ''; // "위치 정보 없음" 안내 텍스트가 남아있을 수 있으므로 비움
+    currentMap = new kakao.maps.Map(mapEl, { center, level: 8 });
+  }
 
   const bounds = new kakao.maps.LatLngBounds();
+  const scriptUrl = getScriptUrl();
   located.forEach(({ plot, pos }) => {
     const done = isDone(plot);
     const position = new kakao.maps.LatLng(pos.lat, pos.lng);
@@ -589,28 +700,27 @@ async function openMap(team, plots) {
     const marker = new kakao.maps.Marker({
       position,
       map: currentMap,
-      image: new kakao.maps.MarkerImage(
-        makeDotSvg(done ? '#1D9E75' : '#8B8B85'),
-        new kakao.maps.Size(18, 18),
-        { offset: new kakao.maps.Point(9, 9) }
-      ),
+      image: getDotMarkerImage(done), // 완료/미완료 두 종류뿐이므로 색상별로 한 번만 만들어 재사용
     });
-
-    // 카카오맵 공식 공유 링크 — 모바일에서 카카오맵 앱이 설치돼 있으면
-    // 자동으로 앱을 열고, 없으면 카카오맵 웹으로 연다(카카오 측에서
-    // 이 딥링크 전환을 처리하므로 앱 URL 스킴을 직접 다룰 필요가 없다).
-    const kakaoMapUrl = 'https://map.kakao.com/link/map/'
-      + encodeURIComponent(plot.plotNo || '조사지') + ',' + pos.lat + ',' + pos.lng;
 
     const info = new kakao.maps.InfoWindow({
-      content: `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
-        <b>${escapeHtml(plot.plotNo || '')}</b>
-        ${plot.basin ? ' · ' + escapeHtml(plot.basin) : ''}
-        <br>${done ? '✅ 완료' : '⏳ 미완료'}
-        <br><a href="${kakaoMapUrl}" target="_blank" rel="noopener" style="color:#1D9E75;font-weight:700;">📍 카카오맵 앱에서 보기</a>
-      </div>`,
+      content: buildInfoContent(plot, pos, done, null), // 완료일은 아직 모름(로딩 중)
     });
-    kakao.maps.event.addListener(marker, 'click', () => info.open(currentMap, marker));
+    kakao.maps.event.addListener(marker, 'click', () => {
+      if (currentInfoWindow) currentInfoWindow.close(); // 이전에 열려있던 정보창을 먼저 닫는다
+      info.open(currentMap, marker);
+      currentInfoWindow = info;
+    });
+
+    // 완료된 포인트만 완료일을 조회한다(미완료는 현장조사 시트에 행 자체가
+    // 없어 조사일도 없다) — 지도·마커는 먼저 그리고, 완료일은 개별
+    // getSurveyData 호출이 필요해 도착하는 대로 정보창 내용만 갱신한다.
+    if (done) {
+      fetchCompletionDate(scriptUrl, plot.plotNo).then(dateLabel => {
+        if (!dateLabel) return;
+        info.setContent(buildInfoContent(plot, pos, done, dateLabel));
+      });
+    }
 
     currentMarkers.push(marker);
   });
@@ -623,6 +733,23 @@ function makeDotSvg(color) {
     <circle cx="9" cy="9" r="7" fill="${color}" stroke="white" stroke-width="2.5"/>
   </svg>`;
   return 'data:image/svg+xml;base64,' + btoa(svg);
+}
+
+// 마커 색상은 완료/미완료 두 가지뿐이므로 kakao.maps.MarkerImage를 마커마다
+// 새로 만들지 않고 한 번씩만 만들어 재사용한다(카카오 SDK 로드 후에만 호출 가능
+// 하므로 openMap()에서 SDK 로드가 끝난 뒤에만 쓰인다 — 지연 생성).
+let _doneMarkerImage = null, _pendingMarkerImage = null;
+function getDotMarkerImage(done) {
+  if (done) {
+    if (!_doneMarkerImage) {
+      _doneMarkerImage = new kakao.maps.MarkerImage(makeDotSvg('#1D9E75'), new kakao.maps.Size(18, 18), { offset: new kakao.maps.Point(9, 9) });
+    }
+    return _doneMarkerImage;
+  }
+  if (!_pendingMarkerImage) {
+    _pendingMarkerImage = new kakao.maps.MarkerImage(makeDotSvg('#8B8B85'), new kakao.maps.Size(18, 18), { offset: new kakao.maps.Point(9, 9) });
+  }
+  return _pendingMarkerImage;
 }
 
 function closeMap() {
