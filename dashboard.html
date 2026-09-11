@@ -216,14 +216,19 @@ body {
 
     <!-- ===== 지도(팀 선택 시) ===== -->
     <div class="card" id="map-card" hidden>
-      <div class="card-header">
+      <div class="card-header" style="flex-wrap:wrap;">
         <button class="back-btn" onclick="closeMap()">← 팀 목록으로</button>
         <span id="map-team-title" style="font-weight:800;"></span>
+      </div>
+      <div id="date-filter-row" style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);" hidden>
+        <select id="date-filter" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
+          <option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>
+        </select>
       </div>
       <div id="map"></div>
       <div class="map-legend">
         <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
-        <span><span class="legend-dot" style="background:#8B8B85;"></span>미완료</span>
+        <span><span class="legend-dot" style="background:#C0392B;"></span>미완료</span>
       </div>
       <div class="no-coord-note" id="no-coord-note" hidden></div>
     </div>
@@ -240,12 +245,29 @@ const MASTER_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzpx33WGdJr52
 // ⚠️ 진짜 보안이 아니라, watermap_V100.html의 기존 관리자 PIN(3864)·팀별 누적
 // 현황 PIN(7119)과 같은 수준의 가벼운 게이트입니다 — URL을 직접 아는 사람을
 // 완전히 막지는 못하지만, 우연히 링크를 본 사람이 바로 들어오는 것은 막습니다.
-const DASHBOARD_PIN = '7119';
+// PIN '7119'의 SHA-256 해시값만 저장한다 — 소스를 그대로 읽어서는
+// 원래 PIN을 알 수 없다(단, 4자리 숫자라 브라우저 콘솔에서 0000~9999를
+// 전부 해시해보는 무차별 대입은 여전히 가능하다 — 클라이언트 전용 코드의
+// 근본적 한계이며, "코드를 읽자마자 바로 보이는" 문제만 해소한다).
+const DASHBOARD_PIN_HASH = '46d4b8ad705c555d8f4e8191b5c54a489818548f3157151a9abba25d7fa93e87';
 
-function checkPin() {
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function checkPin() {
   const input = document.getElementById('pin-input');
   const error = document.getElementById('pin-error');
-  if (input.value === DASHBOARD_PIN) {
+  let inputHash;
+  try {
+    inputHash = await sha256Hex(input.value);
+  } catch (e) {
+    error.textContent = '이 브라우저에서는 PIN 확인 기능을 사용할 수 없습니다(구형 브라우저).';
+    error.style.display = 'block';
+    return;
+  }
+  if (inputHash === DASHBOARD_PIN_HASH) {
     document.getElementById('lock-box').hidden = true;
     document.getElementById('main-content').hidden = false;
     document.getElementById('refresh-btn').hidden = false;
@@ -414,7 +436,8 @@ function normalizeTeams(list) {
 let allTeamsData = []; // [{ team, plots: [...] }]
 let currentMap = null;
 let currentMarkers = [];
-let currentInfoWindow = null; // 한 번에 하나만 열리도록 — 새 마커 클릭 시 이전 것을 닫는다
+let openInfoWindows = []; // 지금 지도 위에 열려있는 정보창들(마커 클릭 시 1개, 날짜 선택 시 여러 개)
+let mapLoadToken = 0; // openMap() 호출이 겹칠 때 오래된 호출을 무시하기 위한 세대 번호
 
 // watermap_V100.html의 모든 호출부와 동일한 규칙 — 관리자가 설정 탭에서
 // 지정한 script_url이 있으면 우선한다(loadAll()과 openMap()이 함께 쓰도록 공용화).
@@ -609,7 +632,9 @@ async function fetchCompletionDate(scriptUrl, plotNo) {
   try {
     const data = await fetchJson(scriptUrl + '?action=getSurveyData&plotNo=' + encodeURIComponent(plotNo));
     if (!data || !Array.isArray(data.soilRow)) return null;
-    return formatKoreanDate(data.soilRow[3]); // soilRow[3] = 조사일
+    const isoDate = data.soilRow[3]; // soilRow[3] = 조사일
+    const label = formatKoreanDate(isoDate);
+    return label ? { label, isoDate } : null;
   } catch (e) {
     return null;
   }
@@ -622,7 +647,7 @@ function buildInfoContent(plot, pos, done, completionDateLabel) {
   const kakaoMapUrl = 'https://map.kakao.com/link/map/'
     + encodeURIComponent(plot.plotNo || '조사지') + ',' + pos.lat + ',' + pos.lng;
   const statusLine = done
-    ? '✅ 완료' + (completionDateLabel ? ' · ' + escapeHtml(completionDateLabel) : ' · <span style="color:#999;">조회 중...</span>')
+    ? '✅ 완료' + (completionDateLabel ? ' · ' + escapeHtml(completionDateLabel) : '')
     : '⏳ 미완료';
   return `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
     <b>${escapeHtml(plot.plotNo || '')}</b>
@@ -631,7 +656,18 @@ function buildInfoContent(plot, pos, done, completionDateLabel) {
     <br><a href="${kakaoMapUrl}" target="_blank" rel="noopener" style="color:#1D9E75;font-weight:700;">📍 카카오맵 앱에서 보기</a>
   </div>`;
 }
+
+function closeAllInfoWindows() {
+  openInfoWindows.forEach(info => info.close());
+  openInfoWindows = [];
+}
+
+function resetDateFilterToDefault() {
+  const dateFilter = document.getElementById('date-filter');
+  if (dateFilter) dateFilter.value = '';
+}
 async function openMap(team, plots) {
+  const myToken = ++mapLoadToken; // 이 호출만의 "세대" 식별자 — 함수 진입 즉시 발급
   const key = getKakaoKey();
   if (!key) {
     document.getElementById('key-setup').hidden = false;
@@ -646,10 +682,12 @@ async function openMap(team, plots) {
   try {
     await loadKakaoSdk(key);
   } catch (err) {
+    if (myToken !== mapLoadToken) return; // 실패한 쪽이 오래된 호출이면 최신 호출의 화면을 덮어쓰지 않는다
     document.getElementById('error-note').textContent = err.message;
     document.getElementById('error-note').hidden = false;
     return;
   }
+  if (myToken !== mapLoadToken) return; // 로딩 중 다른 팀이 선택됐으면 여기서 중단
 
   const located = [];
   let noCoordCount = 0;
@@ -672,15 +710,34 @@ async function openMap(team, plots) {
     currentMarkers.forEach(m => m.setMap(null));
     currentMarkers = [];
   }
-  currentInfoWindow = null; // 팀을 바꾸면 이전 팀의 정보창 참조도 함께 정리
+  // 팀을 바꾸면 이전 팀의 정보창도 실제로 닫고 드롭다운도 리셋한다
+  // (단순히 참조만 버리던 예전 방식보다 안전 — 열린 채로 남는 정보창이 없다).
+  closeAllInfoWindows();
+  resetDateFilterToDefault();
 
   if (located.length === 0) {
     currentMap = null; // 다음에 위치가 있는 팀을 열 때 지도를 새로 만들어야 하므로 참조를 버린다
     mapEl.innerHTML = '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
+    document.getElementById('date-filter-row').hidden = true;
     return;
   }
 
+  // 완료일 사전 로딩 — 날짜별 그룹 드롭다운을 만들려면 이 팀의 완료 포인트
+  // 전체의 완료일을 마커를 그리기 전에 먼저 알아야 한다.
+  const scriptUrl = getScriptUrl();
+  const donePoints = located.filter(({ plot }) => isDone(plot));
+  const dateResults = await Promise.allSettled(
+    donePoints.map(({ plot }) => fetchCompletionDate(scriptUrl, plot.plotNo))
+  );
+  const completionInfoByPlotNo = {};
+  donePoints.forEach(({ plot }, i) => {
+    const r = dateResults[i];
+    if (r.status === 'fulfilled' && r.value) completionInfoByPlotNo[plot.plotNo] = r.value;
+  });
+  if (myToken !== mapLoadToken) return; // 완료일 조회 중 다른 팀이 선택됐으면 여기서 중단
+
   const center = new kakao.maps.LatLng(located[0].pos.lat, located[0].pos.lng);
+  const isNewMap = !currentMap; // 이번에 지도를 새로 만드는지(true) 재사용하는지(false)
   if (currentMap) {
     // 이미 지도가 떠 있으면(팀 전환) 재사용 — 매번 새로 만들면 반복 전환 시
     // 불필요한 재초기화로 저사양 기기에서 끊김이 생긴다.
@@ -689,9 +746,18 @@ async function openMap(team, plots) {
     mapEl.innerHTML = ''; // "위치 정보 없음" 안내 텍스트가 남아있을 수 있으므로 비움
     currentMap = new kakao.maps.Map(mapEl, { center, level: 8 });
   }
+  if (isNewMap) {
+    // 지도를 새로 만드는 분기에서만 등록해 중복 등록을 막는다 —
+    // currentMap이 재사용되는 한(팀을 계속 전환하는 한) 이 리스너는 한 번만 걸린다.
+    kakao.maps.event.addListener(currentMap, 'click', () => {
+      closeAllInfoWindows();
+      resetDateFilterToDefault();
+    });
+  }
 
   const bounds = new kakao.maps.LatLngBounds();
-  const scriptUrl = getScriptUrl();
+  const groupsByDate = {}; // { "9/10(목)": { isoDate, items: [{plot, pos, marker, info}, ...] } }
+
   located.forEach(({ plot, pos }) => {
     const done = isDone(plot);
     const position = new kakao.maps.LatLng(pos.lat, pos.lng);
@@ -703,29 +769,55 @@ async function openMap(team, plots) {
       image: getDotMarkerImage(done), // 완료/미완료 두 종류뿐이므로 색상별로 한 번만 만들어 재사용
     });
 
+    // 완료일은 위에서 전부 미리 조회해뒀으므로 그 결과를 꺼내 쓰기만 한다.
+    const dateInfo = completionInfoByPlotNo[plot.plotNo]; // undefined 가능(미완료 또는 조회 실패)
     const info = new kakao.maps.InfoWindow({
-      content: buildInfoContent(plot, pos, done, null), // 완료일은 아직 모름(로딩 중)
-    });
-    kakao.maps.event.addListener(marker, 'click', () => {
-      if (currentInfoWindow) currentInfoWindow.close(); // 이전에 열려있던 정보창을 먼저 닫는다
-      info.open(currentMap, marker);
-      currentInfoWindow = info;
+      content: buildInfoContent(plot, pos, done, dateInfo ? dateInfo.label : null),
     });
 
-    // 완료된 포인트만 완료일을 조회한다(미완료는 현장조사 시트에 행 자체가
-    // 없어 조사일도 없다) — 지도·마커는 먼저 그리고, 완료일은 개별
-    // getSurveyData 호출이 필요해 도착하는 대로 정보창 내용만 갱신한다.
-    if (done) {
-      fetchCompletionDate(scriptUrl, plot.plotNo).then(dateLabel => {
-        if (!dateLabel) return;
-        info.setContent(buildInfoContent(plot, pos, done, dateLabel));
-      });
+    kakao.maps.event.addListener(marker, 'click', () => {
+      closeAllInfoWindows();
+      resetDateFilterToDefault();
+      info.open(currentMap, marker);
+      openInfoWindows = [info];
+    });
+
+    if (dateInfo) {
+      if (!groupsByDate[dateInfo.label]) groupsByDate[dateInfo.label] = { isoDate: dateInfo.isoDate, items: [] };
+      groupsByDate[dateInfo.label].items.push({ plot, pos, marker, info });
     }
 
     currentMarkers.push(marker);
   });
 
   currentMap.setBounds(bounds);
+
+  // 날짜 드롭다운 옵션 채우기 — 정렬은 라벨 문자열이 아니라 isoDate 기준으로 한다
+  // (포맷된 라벨을 그대로 정렬하면 "10/2"가 "9/9"보다 앞에 오는 등 순서가 틀린다).
+  const sortedLabels = Object.keys(groupsByDate).sort(
+    (a, b) => new Date(groupsByDate[a].isoDate) - new Date(groupsByDate[b].isoDate)
+  );
+  const dateFilterRow = document.getElementById('date-filter-row');
+  const dateFilterSelect = document.getElementById('date-filter');
+  if (sortedLabels.length > 0) {
+    dateFilterSelect.innerHTML = '<option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>'
+      + sortedLabels.map(label =>
+          `<option value="${escapeHtml(label)}">${escapeHtml(label)} · ${groupsByDate[label].items.length}건</option>`
+        ).join('');
+    dateFilterRow.hidden = false;
+  } else {
+    dateFilterRow.hidden = true; // 그 팀에 완료 포인트(또는 완료일 확인 가능한 포인트)가 하나도 없음
+  }
+
+  dateFilterSelect.onchange = (e) => {
+    const dateLabel = e.target.value; // closeAllInfoWindows() 호출보다 먼저 읽는다
+    closeAllInfoWindows();
+    if (!dateLabel) return; // "날짜 선택" 기본 옵션으로 되돌아가면 전부 닫은 채로 끝
+    (groupsByDate[dateLabel]?.items || []).forEach(({ marker, info }) => {
+      info.open(currentMap, marker);
+      openInfoWindows.push(info);
+    });
+  };
 }
 
 function makeDotSvg(color) {
@@ -747,7 +839,7 @@ function getDotMarkerImage(done) {
     return _doneMarkerImage;
   }
   if (!_pendingMarkerImage) {
-    _pendingMarkerImage = new kakao.maps.MarkerImage(makeDotSvg('#8B8B85'), new kakao.maps.Size(18, 18), { offset: new kakao.maps.Point(9, 9) });
+    _pendingMarkerImage = new kakao.maps.MarkerImage(makeDotSvg('#C0392B'), new kakao.maps.Size(18, 18), { offset: new kakao.maps.Point(9, 9) });
   }
   return _pendingMarkerImage;
 }
