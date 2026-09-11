@@ -1,0 +1,579 @@
+<!--
+  이 코드의 저작권은 노경호(네이버 아이디 bimil2ya@naver.com, 1967년생)에게 있으며, 무단 복제·수정·배포를 금합니다.
+  이 프로젝트는 bimil2ya 개인 사용을 위해 만든 개인 포크이며, 타인의 사용을 허용하지 않습니다.
+  사용을 원하는 경우 bimil2ya@naver.com으로 사전에 승인을 받아야 합니다.
+  본 코드는 "있는 그대로(AS IS)" 제공되며, 사용/오사용으로 인한 어떠한 손해에 대해서도
+  저작권자는 책임지지 않습니다. 자세한 내용은 저장소의 LICENSE.md를 참고하세요.
+-->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0A5C45">
+<title>조사 현황 대시보드 (경호버전)</title>
+
+<style>
+:root {
+  --green: #1D9E75;
+  --green-dark: #0A5C45;
+  --green-light: #D4F0E5;
+  --green-mid: #7ECFB3;
+  --gray-bg: #F0F0EE;
+  --gray-border: #C8C6C0;
+  --gray-text: #6B6966;
+  --text: #1A1A18;
+  --text-sub: #444240;
+  --white: #FFFFFF;
+  --danger: #C0392B;
+  --danger-bg: #FDECEA;
+  --warning: #8B5A00;
+  --warning-bg: #FFF3CC;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html { overscroll-behavior: none; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  background: var(--gray-bg); color: var(--text); font-size: 17px; line-height: 1.6;
+  padding-bottom: 40px;
+}
+.topbar {
+  background: var(--green-dark); color: var(--white); padding: 16px 18px;
+  font-size: 19px; font-weight: 800; display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 20;
+}
+.topbar .sub { font-size: 12.5px; font-weight: 500; opacity: 0.85; margin-top: 2px; }
+.container { max-width: 720px; margin: 0 auto; padding: 16px; }
+
+/* ===== PIN 잠금 화면 ===== */
+.lock-box {
+  background: var(--white); border-radius: var(--radius); border: 1.5px solid var(--gray-border);
+  padding: 32px 20px; margin-top: 40px; text-align: center;
+}
+.lock-box .icon { font-size: 40px; margin-bottom: 12px; }
+.lock-box input {
+  width: 100%; max-width: 220px; padding: 13px 14px; border: 2px solid var(--gray-border);
+  border-radius: var(--radius-sm); font-size: 20px; text-align: center; letter-spacing: 4px;
+  margin: 14px 0 10px;
+}
+.lock-box button {
+  padding: 12px 28px; border-radius: var(--radius-sm); border: none; background: var(--green-dark);
+  color: var(--white); font-size: 16px; font-weight: 700; cursor: pointer;
+}
+.lock-error { color: var(--danger); font-size: 14px; font-weight: 600; display: none; margin-top: 8px; }
+
+/* ===== 공통 카드 ===== */
+.card {
+  background: var(--white); border-radius: var(--radius); border: 1.5px solid var(--gray-border);
+  margin-bottom: 14px; overflow: hidden;
+}
+.card-header {
+  padding: 13px 16px; display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1.5px solid var(--gray-border); background: #F8F8F6; font-weight: 800; font-size: 15px;
+}
+.card-body { padding: 14px 16px; }
+
+/* ===== 전체 현황 ===== */
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 4px; }
+.stat-box { text-align: center; padding: 12px 6px; border-radius: var(--radius-sm); background: var(--gray-bg); }
+.stat-box .num { font-size: 24px; font-weight: 800; color: var(--green-dark); }
+.stat-box .num.pending { color: var(--warning); }
+.stat-box .label { font-size: 12.5px; color: var(--text-sub); margin-top: 2px; }
+.progress-track {
+  width: 100%; height: 10px; border-radius: 6px; background: var(--gray-bg); overflow: hidden; margin-top: 12px;
+}
+.progress-fill { height: 100%; background: var(--green); border-radius: 6px; transition: width 0.3s; }
+
+/* ===== 팀 목록 ===== */
+.team-row {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 4px;
+  border-bottom: 1px solid var(--gray-border); cursor: pointer; gap: 10px;
+}
+.team-row:last-child { border-bottom: none; }
+.team-row:active { background: var(--gray-bg); }
+.team-row.active { background: var(--green-light); }
+.team-name { font-weight: 700; font-size: 15.5px; flex-shrink: 0; }
+.team-bar-wrap { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.team-bar-track { flex: 1; height: 8px; border-radius: 5px; background: var(--gray-bg); overflow: hidden; }
+.team-bar-fill { height: 100%; background: var(--green); border-radius: 5px; }
+.team-count { font-size: 13px; color: var(--text-sub); white-space: nowrap; flex-shrink: 0; }
+.team-arrow { color: var(--gray-text); font-size: 14px; flex-shrink: 0; }
+
+/* ===== 지도 영역 ===== */
+#map { width: 100%; height: 50vh; min-height: 320px; background: var(--gray-bg); }
+.map-legend {
+  display: flex; gap: 16px; padding: 10px 16px; font-size: 13px; color: var(--text-sub);
+  background: #F8F8F6; border-top: 1.5px solid var(--gray-border);
+}
+.legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.back-btn {
+  background: none; border: none; color: var(--green-dark); font-weight: 700; font-size: 15px;
+  cursor: pointer; padding: 4px 0; display: flex; align-items: center; gap: 4px;
+}
+.no-coord-note {
+  padding: 10px 16px; font-size: 13px; color: var(--warning); background: var(--warning-bg);
+  border-top: 1.5px solid var(--gray-border);
+}
+.refresh-btn {
+  background: none; border: 1.5px solid var(--green-mid); color: var(--green-dark); border-radius: var(--radius-sm);
+  padding: 6px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
+}
+.loading-note { text-align: center; padding: 40px 20px; color: var(--text-sub); font-size: 15px; }
+.error-note {
+  text-align: center; padding: 20px; color: var(--danger); background: var(--danger-bg);
+  border-radius: var(--radius-sm); margin: 10px 0; font-size: 14.5px;
+}
+[hidden] { display: none !important; }
+
+/* ===== 카카오 키 설정 ===== */
+.key-setup {
+  background: var(--warning-bg); border: 1.5px solid var(--warning); border-radius: var(--radius-sm);
+  padding: 14px; margin-bottom: 14px; font-size: 14px; color: var(--warning);
+}
+.key-setup input {
+  width: 100%; padding: 10px 12px; border: 2px solid var(--gray-border); border-radius: var(--radius-sm);
+  font-size: 15px; margin: 8px 0; color: var(--text); background: var(--white);
+}
+.key-setup button {
+  padding: 9px 18px; border-radius: var(--radius-sm); border: none; background: var(--green-dark);
+  color: var(--white); font-weight: 700; cursor: pointer; font-size: 14px;
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <div>📍 조사 현황 대시보드</div>
+    <div class="sub" id="topbar-sub">조원별 작업포인트 진행 상황</div>
+  </div>
+  <button class="refresh-btn" id="refresh-btn" hidden onclick="loadAll(true)">새로고침</button>
+</div>
+
+<div class="container">
+
+  <!-- ===== PIN 잠금 ===== -->
+  <div class="lock-box" id="lock-box">
+    <div class="icon">🔒</div>
+    <div style="font-weight:700;font-size:16px;">비밀번호를 입력하세요</div>
+    <input type="password" id="pin-input" placeholder="••••" maxlength="10"
+      onkeydown="if(event.key==='Enter')checkPin()">
+    <div><button onclick="checkPin()">확인</button></div>
+    <div class="lock-error" id="pin-error">비밀번호가 올바르지 않습니다</div>
+  </div>
+
+  <!-- ===== 본문(PIN 통과 후 표시) ===== -->
+  <div id="main-content" hidden>
+
+    <!-- 카카오 JS 키가 없을 때만 표시 -->
+    <div class="key-setup" id="key-setup" hidden>
+      ⚠️ 카카오맵 표시를 위해 JavaScript 키가 필요합니다.
+      <a href="https://developers.kakao.com/" target="_blank" style="color:inherit;">카카오 개발자 콘솔</a>에서
+      앱을 만들고 "JavaScript 키"를 발급받은 뒤, 아래에 입력하세요(이 기기의 브라우저에만 저장되고
+      서버로 전송되지 않습니다). 앱 설정의 "플랫폼 &gt; Web"에 이 페이지 주소도 등록해야 합니다.
+      <input type="text" id="kakao-key-input" placeholder="카카오 JavaScript 키">
+      <button onclick="saveKakaoKeyAndReload()">저장하고 지도 불러오기</button>
+    </div>
+
+    <div id="loading-note" class="loading-note">불러오는 중...</div>
+    <div id="error-note" class="error-note" hidden></div>
+
+    <!-- ===== 전체 현황 ===== -->
+    <div class="card" id="overview-card" hidden>
+      <div class="card-header">전체 현황</div>
+      <div class="card-body">
+        <div class="stat-grid">
+          <div class="stat-box"><div class="num" id="stat-total">-</div><div class="label">전체 포인트</div></div>
+          <div class="stat-box"><div class="num" id="stat-done">-</div><div class="label">완료</div></div>
+          <div class="stat-box"><div class="num pending" id="stat-pending">-</div><div class="label">미완료</div></div>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="overall-progress" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <!-- ===== 팀 목록 ===== -->
+    <div class="card" id="team-list-card" hidden>
+      <div class="card-header">팀 선택 — 지도에서 위치 보기</div>
+      <div class="card-body" id="team-list-body"></div>
+    </div>
+
+    <!-- ===== 지도(팀 선택 시) ===== -->
+    <div class="card" id="map-card" hidden>
+      <div class="card-header">
+        <button class="back-btn" onclick="closeMap()">← 팀 목록으로</button>
+        <span id="map-team-title" style="font-weight:800;"></span>
+      </div>
+      <div id="map"></div>
+      <div class="map-legend">
+        <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
+        <span><span class="legend-dot" style="background:#8B8B85;"></span>미완료</span>
+      </div>
+      <div class="no-coord-note" id="no-coord-note" hidden></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 설정 — watermap_V100.html과 동일한 값(서버는 절대 수정하지 않음, 읽기 전용 GET만)
+// ============================================================
+const MASTER_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzpx33WGdJr52Z1d9c_n5zgtN6L76FyJ4MoueM8wl2fxANVtL5wVgM4VSgWHOOq1dGz/exec';
+
+// ⚠️ 진짜 보안이 아니라, watermap_V100.html의 기존 관리자 PIN(3864)·팀별 누적
+// 현황 PIN(7119)과 같은 수준의 가벼운 게이트입니다 — URL을 직접 아는 사람을
+// 완전히 막지는 못하지만, 우연히 링크를 본 사람이 바로 들어오는 것은 막습니다.
+const DASHBOARD_PIN = '7119';
+
+function checkPin() {
+  const input = document.getElementById('pin-input');
+  const error = document.getElementById('pin-error');
+  if (input.value === DASHBOARD_PIN) {
+    document.getElementById('lock-box').hidden = true;
+    document.getElementById('main-content').hidden = false;
+    document.getElementById('refresh-btn').hidden = false;
+    error.style.display = 'none';
+    initDashboard();
+  } else {
+    error.style.display = 'block';
+    input.value = '';
+    input.focus();
+  }
+}
+
+// ============================================================
+// EPSG5186(GRS80, 중부원점 TM) ↔ WGS84 좌표 변환
+// watermap_V100.html의 wgs84ToEpsg5186()와 짝을 이루는 역변환 —
+// 표준 TM 역변환 공식(Snyder, Map Projections: A Working Manual 기준)을 그대로 구현.
+// ============================================================
+function epsg5186ToWgs84(x, y) {
+  const deg2rad = Math.PI / 180;
+  const rad2deg = 180 / Math.PI;
+  const a = 6378137.0;
+  const f = 1 / 298.257222101;
+  const e2 = 2 * f - f * f;
+  const lat0 = 38.0 * deg2rad;
+  const lng0 = 127.0 * deg2rad;
+  const k0 = 1.0;
+  const FE = 200000.0;
+  const FN = 600000.0;
+  const e4 = e2 * e2, e6 = e4 * e2;
+  const ep2 = e2 / (1 - e2); // e'^2
+
+  const xp = x - FE;
+  const yp = y - FN;
+
+  const M0 = a * ((1 - e2/4 - 3*e4/64 - 5*e6/256)*lat0
+    - (3*e2/8 + 3*e4/32 + 45*e6/1024)*Math.sin(2*lat0)
+    + (15*e4/256 + 45*e6/1024)*Math.sin(4*lat0)
+    - (35*e6/3072)*Math.sin(6*lat0));
+
+  const M = M0 + yp / k0;
+  const mu = M / (a * (1 - e2/4 - 3*e4/64 - 5*e6/256));
+
+  const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+  const e1_2 = e1*e1, e1_3 = e1_2*e1, e1_4 = e1_3*e1;
+
+  const lat1 = mu
+    + (3*e1/2 - 27*e1_3/32) * Math.sin(2*mu)
+    + (21*e1_2/16 - 55*e1_4/32) * Math.sin(4*mu)
+    + (151*e1_3/96) * Math.sin(6*mu)
+    + (1097*e1_4/512) * Math.sin(8*mu);
+
+  const N1 = a / Math.sqrt(1 - e2 * Math.sin(lat1) ** 2);
+  const T1 = Math.tan(lat1) ** 2;
+  const C1 = ep2 * Math.cos(lat1) ** 2;
+  const R1 = a * (1 - e2) / Math.pow(1 - e2 * Math.sin(lat1) ** 2, 1.5);
+  const D = xp / (N1 * k0);
+
+  const lat = lat1 - (N1 * Math.tan(lat1) / R1) * (
+    D**2/2
+    - (5 + 3*T1 + 10*C1 - 4*C1**2 - 9*ep2) * D**4/24
+    + (61 + 90*T1 + 298*C1 + 45*T1**2 - 252*ep2 - 3*C1**2) * D**6/720
+  );
+
+  const lng = lng0 + (
+    D
+    - (1 + 2*T1 + C1) * D**3/6
+    + (5 - 2*C1 + 28*T1 - 3*C1**2 + 8*ep2 + 24*T1**2) * D**5/120
+  ) / Math.cos(lat1);
+
+  return { lat: lat * rad2deg, lng: lng * rad2deg };
+}
+
+// 서버가 돌려주는 x/y가 실제로 어떤 좌표계인지 클라이언트 코드 어디에서도
+// 검증되지 않은 채로 쓰이고 있어(getPlots 응답을 소비하는 곳이 지금까지
+// 없었음), 값의 범위로 자동 판별한다 — 이미 위경도(WGS84)로 들어있는
+// 경우와 EPSG5186(TM) 좌표로 들어있는 경우 둘 다 대비.
+// 한반도 대략 범위: 위도 33~43, 경도 124~132 / EPSG5186 TM(중부원점,
+// FE=200000, FN=600000) 대략 범위: X 0~450000, Y 0~950000.
+function resolveLatLng(rawX, rawY) {
+  const x = parseFloat(rawX);
+  const y = parseFloat(rawY);
+  if (!isFinite(x) || !isFinite(y) || (x === 0 && y === 0)) return null;
+
+  // 이미 WGS84(위경도)로 보이는 경우 — x가 경도, y가 위도로 저장됐을 가능성
+  if (x >= 120 && x <= 135 && y >= 30 && y <= 45) {
+    return { lat: y, lng: x };
+  }
+  // 반대 순서(x=위도, y=경도)로 저장됐을 가능성도 방어적으로 확인
+  if (y >= 120 && y <= 135 && x >= 30 && x <= 45) {
+    return { lat: x, lng: y };
+  }
+  // EPSG5186 TM 좌표로 보이는 범위
+  if (x >= 0 && x <= 450000 && y >= 0 && y <= 950000) {
+    const { lat, lng } = epsg5186ToWgs84(x, y);
+    if (lat >= 30 && lat <= 45 && lng >= 120 && lng <= 135) {
+      return { lat, lng };
+    }
+  }
+  return null; // 판별 불가 — 지도에는 표시하지 않고 "위치 정보 없음"으로 집계
+}
+
+// ============================================================
+// 카카오맵 JS 키 관리 — 소스에 하드코딩하지 않고 이 브라우저의
+// localStorage에만 저장한다(서버로 전송되지 않음).
+// ============================================================
+function getKakaoKey() {
+  return localStorage.getItem('dashboard_kakao_key') || '';
+}
+function saveKakaoKeyAndReload() {
+  const key = document.getElementById('kakao-key-input').value.trim();
+  if (!key) return;
+  localStorage.setItem('dashboard_kakao_key', key);
+  location.reload();
+}
+function loadKakaoSdk(key) {
+  return new Promise((resolve, reject) => {
+    if (window.kakao && window.kakao.maps) { resolve(); return; }
+    const script = document.createElement('script');
+    script.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + encodeURIComponent(key) + '&autoload=false';
+    script.onload = () => window.kakao.maps.load(resolve);
+    script.onerror = () => reject(new Error('카카오맵 SDK 로드 실패 — JavaScript 키 또는 도메인 등록을 확인하세요'));
+    document.head.appendChild(script);
+  });
+}
+
+// ============================================================
+// 데이터 조회 — watermap_V100.html이 이미 쓰는 것과 동일한 읽기 전용
+// GET 엔드포인트(getTeams/getPlots)만 호출한다. 서버는 전혀 수정하지 않음.
+// ============================================================
+async function fetchJson(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+function isDone(p) {
+  const d = p && p.done;
+  return d === '완료' || d === 'O' || d === 'Y';
+}
+
+let allTeamsData = []; // [{ team, plots: [...] }]
+let currentMap = null;
+let currentMarkers = [];
+
+async function loadAll(isManualRefresh) {
+  const loadingNote = document.getElementById('loading-note');
+  const errorNote = document.getElementById('error-note');
+  const overviewCard = document.getElementById('overview-card');
+  const teamListCard = document.getElementById('team-list-card');
+
+  errorNote.hidden = true;
+  loadingNote.hidden = false;
+  if (!isManualRefresh) {
+    overviewCard.hidden = true;
+    teamListCard.hidden = true;
+  }
+
+  try {
+    const teamsData = await fetchJson(MASTER_SCRIPT_URL + '?action=getTeams');
+    const teams = Array.isArray(teamsData.teams) ? teamsData.teams.filter(t => typeof t === 'string' && t.trim()) : [];
+
+    const results = await Promise.allSettled(teams.map(async team => {
+      const data = await fetchJson(MASTER_SCRIPT_URL + '?action=getPlots&team=' + encodeURIComponent(team));
+      const plots = Array.isArray(data.plots) ? data.plots : [];
+      return { team, plots };
+    }));
+
+    const failed = results.filter(r => r.status === 'rejected');
+    allTeamsData = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+
+    renderOverview(allTeamsData);
+    renderTeamList(allTeamsData);
+
+    if (failed.length > 0) {
+      errorNote.textContent = `${failed.length}개 팀의 데이터를 불러오지 못했습니다(다른 팀은 정상 표시). 새로고침을 눌러 다시 시도해보세요.`;
+      errorNote.hidden = false;
+    }
+  } catch (err) {
+    console.error(err);
+    errorNote.textContent = '데이터를 불러오지 못했습니다: ' + err.message;
+    errorNote.hidden = false;
+    overviewCard.hidden = true;
+    teamListCard.hidden = true;
+  } finally {
+    loadingNote.hidden = true;
+  }
+}
+
+function renderOverview(teamsData) {
+  let total = 0, done = 0;
+  teamsData.forEach(({ plots }) => {
+    plots.forEach(p => {
+      total++;
+      if (isDone(p)) done++;
+    });
+  });
+  const pending = total - done;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-done').textContent = done;
+  document.getElementById('stat-pending').textContent = pending;
+  document.getElementById('overall-progress').style.width = pct + '%';
+  document.getElementById('topbar-sub').textContent =
+    total > 0 ? `전체 ${total}건 중 ${done}건 완료(${pct}%)` : '조원별 작업포인트 진행 상황';
+  document.getElementById('overview-card').hidden = false;
+}
+
+function renderTeamList(teamsData) {
+  const body = document.getElementById('team-list-body');
+  body.innerHTML = '';
+
+  const sorted = [...teamsData].sort((a, b) => a.team.localeCompare(b.team, 'ko'));
+
+  sorted.forEach(({ team, plots }) => {
+    const total = plots.length;
+    const done = plots.filter(isDone).length;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    const row = document.createElement('div');
+    row.className = 'team-row';
+    row.innerHTML = `
+      <span class="team-name">${escapeHtml(team)}</span>
+      <span class="team-bar-wrap">
+        <span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
+        <span class="team-count">${done}/${total}</span>
+      </span>
+      <span class="team-arrow">▶</span>
+    `;
+    row.onclick = () => openMap(team, plots);
+    body.appendChild(row);
+  });
+
+  document.getElementById('team-list-card').hidden = sorted.length === 0;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ============================================================
+// 지도 표시
+// ============================================================
+async function openMap(team, plots) {
+  const key = getKakaoKey();
+  if (!key) {
+    document.getElementById('key-setup').hidden = false;
+    document.getElementById('key-setup').scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+
+  document.getElementById('map-team-title').textContent = team;
+  document.getElementById('map-card').hidden = false;
+  document.getElementById('map-card').scrollIntoView({ behavior: 'smooth' });
+
+  try {
+    await loadKakaoSdk(key);
+  } catch (err) {
+    document.getElementById('error-note').textContent = err.message;
+    document.getElementById('error-note').hidden = false;
+    return;
+  }
+
+  const located = [];
+  let noCoordCount = 0;
+  plots.forEach(p => {
+    const pos = resolveLatLng(p.x, p.y);
+    if (pos) located.push({ plot: p, pos });
+    else noCoordCount++;
+  });
+
+  const noCoordNote = document.getElementById('no-coord-note');
+  if (noCoordCount > 0) {
+    noCoordNote.textContent = `📍 위치 정보가 없는 표준지 ${noCoordCount}건은 지도에 표시되지 않습니다.`;
+    noCoordNote.hidden = false;
+  } else {
+    noCoordNote.hidden = true;
+  }
+
+  const mapEl = document.getElementById('map');
+  if (currentMarkers.length) {
+    currentMarkers.forEach(m => m.setMap(null));
+    currentMarkers = [];
+  }
+
+  if (located.length === 0) {
+    mapEl.innerHTML = '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
+    return;
+  }
+  mapEl.innerHTML = '';
+
+  const center = new kakao.maps.LatLng(located[0].pos.lat, located[0].pos.lng);
+  currentMap = new kakao.maps.Map(mapEl, { center, level: 8 });
+
+  const bounds = new kakao.maps.LatLngBounds();
+  located.forEach(({ plot, pos }) => {
+    const done = isDone(plot);
+    const position = new kakao.maps.LatLng(pos.lat, pos.lng);
+    bounds.extend(position);
+
+    const marker = new kakao.maps.Marker({
+      position,
+      map: currentMap,
+      image: new kakao.maps.MarkerImage(
+        makeDotSvg(done ? '#1D9E75' : '#8B8B85'),
+        new kakao.maps.Size(18, 18),
+        { offset: new kakao.maps.Point(9, 9) }
+      ),
+    });
+
+    const info = new kakao.maps.InfoWindow({
+      content: `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
+        <b>${escapeHtml(plot.plotNo || '')}</b>
+        ${plot.basin ? ' · ' + escapeHtml(plot.basin) : ''}
+        <br>${done ? '✅ 완료' : '⏳ 미완료'}
+      </div>`,
+    });
+    kakao.maps.event.addListener(marker, 'click', () => info.open(currentMap, marker));
+
+    currentMarkers.push(marker);
+  });
+
+  currentMap.setBounds(bounds);
+}
+
+function makeDotSvg(color) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">
+    <circle cx="9" cy="9" r="7" fill="${color}" stroke="white" stroke-width="2.5"/>
+  </svg>`;
+  return 'data:image/svg+xml;base64,' + btoa(svg);
+}
+
+function closeMap() {
+  document.getElementById('map-card').hidden = true;
+  document.getElementById('team-list-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+function initDashboard() {
+  if (!getKakaoKey()) {
+    document.getElementById('key-setup').hidden = false;
+  }
+  loadAll(false);
+}
+</script>
+</body>
+</html>
