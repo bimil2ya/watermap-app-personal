@@ -45,6 +45,12 @@ body {
   position: sticky; top: 0; z-index: 20;
 }
 .topbar .sub { font-size: 12.5px; font-weight: 500; opacity: 0.85; margin-top: 2px; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.back-to-app-btn {
+  color: var(--white); font-size: 13px; font-weight: 700; text-decoration: none;
+  padding: 6px 10px; border-radius: var(--radius-sm); white-space: nowrap;
+}
+.back-to-app-btn:active { background: rgba(255,255,255,0.15); }
 .container { max-width: 720px; margin: 0 auto; padding: 16px; }
 
 /* ===== PIN 잠금 화면 ===== */
@@ -87,19 +93,24 @@ body {
 .progress-fill { height: 100%; background: var(--green); border-radius: 6px; transition: width 0.3s; }
 
 /* ===== 팀 목록 ===== */
+.team-block { border-bottom: 1px solid var(--gray-border); }
+.team-block:last-child { border-bottom: none; }
 .team-row {
-  display: flex; align-items: center; justify-content: space-between; padding: 12px 4px;
-  border-bottom: 1px solid var(--gray-border); cursor: pointer; gap: 10px;
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 4px 6px;
+  cursor: pointer; gap: 10px; flex-wrap: wrap;
 }
-.team-row:last-child { border-bottom: none; }
 .team-row:active { background: var(--gray-bg); }
 .team-row.active { background: var(--green-light); }
-.team-name { font-weight: 700; font-size: 15.5px; flex-shrink: 0; }
-.team-bar-wrap { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.team-name { font-weight: 700; font-size: 15.5px; flex-shrink: 0; word-break: break-word; }
+.team-basin { font-weight: 400; font-size: 12.5px; color: var(--text-sub); }
+.team-bar-wrap { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 120px; }
 .team-bar-track { flex: 1; height: 8px; border-radius: 5px; background: var(--gray-bg); overflow: hidden; }
 .team-bar-fill { height: 100%; background: var(--green); border-radius: 5px; }
 .team-count { font-size: 13px; color: var(--text-sub); white-space: nowrap; flex-shrink: 0; }
 .team-arrow { color: var(--gray-text); font-size: 14px; flex-shrink: 0; }
+.team-week-list { padding: 0 4px 10px 4px; cursor: default; }
+.team-week-row { display: flex; justify-content: space-between; padding: 2px 0 2px 14px; font-size: 12px; color: var(--text-sub); gap: 8px; }
+.team-week-cum { color: var(--gray-text); }
 
 /* ===== 지도 영역 ===== */
 #map { width: 100%; height: 50vh; min-height: 320px; background: var(--gray-bg); }
@@ -117,8 +128,8 @@ body {
   border-top: 1.5px solid var(--gray-border);
 }
 .refresh-btn {
-  background: none; border: 1.5px solid var(--green-mid); color: var(--green-dark); border-radius: var(--radius-sm);
-  padding: 6px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
+  background: none; border: 1.5px solid var(--green-mid); color: var(--white); border-radius: var(--radius-sm);
+  padding: 6px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer; flex-shrink: 0;
 }
 .loading-note { text-align: center; padding: 40px 20px; color: var(--text-sub); font-size: 15px; }
 .error-note {
@@ -149,7 +160,10 @@ body {
     <div>📍 조사 현황 대시보드</div>
     <div class="sub" id="topbar-sub">조원별 작업포인트 진행 상황</div>
   </div>
-  <button class="refresh-btn" id="refresh-btn" hidden onclick="loadAll(true)">새로고침</button>
+  <div class="topbar-actions">
+    <a class="back-to-app-btn" href="watermap_V100.html">← 메인 앱으로</a>
+    <button class="refresh-btn" id="refresh-btn" hidden onclick="loadAll(true)">새로고침</button>
+  </div>
 </div>
 
 <div class="container">
@@ -439,6 +453,34 @@ function renderOverview(teamsData) {
   document.getElementById('overview-card').hidden = false;
 }
 
+// 유역명·주차별 집계 — watermap_V100.html의 loadTeamSummary()와 동일한 규칙
+// (팀별 누적 현황 카드가 이 대시보드로 흡수되면서 그 로직을 그대로 재구현했다).
+function summarizeTeam(plots) {
+  const basinSet = new Set();
+  plots.forEach(p => {
+    const b = (p && p.basin ? p.basin : '').toString().trim();
+    if (b) basinSet.add(b);
+  });
+
+  const weekGroups = {};
+  plots.forEach(p => {
+    const week = (p && p.week ? p.week : '').toString().trim() || '주차미정';
+    (weekGroups[week] = weekGroups[week] || []).push(p);
+  });
+  const weekKeys = Object.keys(weekGroups).sort((a, b) => (parseInt(a) || 9999) - (parseInt(b) || 9999));
+
+  let cumDone = 0, cumTotal = 0;
+  const weeks = weekKeys.map(week => {
+    const arr = weekGroups[week];
+    const done = arr.filter(isDone).length;
+    const total = arr.length;
+    cumDone += done; cumTotal += total;
+    return { week, done, total, cumDone, cumTotal };
+  });
+
+  return { basins: [...basinSet], weeks };
+}
+
 function renderTeamList(teamsData) {
   const body = document.getElementById('team-list-body');
   body.innerHTML = '';
@@ -449,19 +491,32 @@ function renderTeamList(teamsData) {
     const total = plots.length;
     const done = plots.filter(isDone).length;
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const { basins, weeks } = summarizeTeam(plots);
+    const basinLabel = basins.length > 0 ? ` (${basins.map(escapeHtml).join(', ')})` : '';
 
-    const row = document.createElement('div');
-    row.className = 'team-row';
-    row.innerHTML = `
-      <span class="team-name">${escapeHtml(team)}</span>
-      <span class="team-bar-wrap">
-        <span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
-        <span class="team-count">${done}/${total}</span>
-      </span>
-      <span class="team-arrow">▶</span>
+    const weekRowsHtml = weeks.map(w => {
+      const label = w.week === '주차미정' ? '주차미정' : (w.week + '주차');
+      return `<div class="team-week-row">
+        <span>${escapeHtml(label)}</span>
+        <span>완료 ${w.done}/${w.total} <span class="team-week-cum">(누적 ${w.cumDone}/${w.cumTotal})</span></span>
+      </div>`;
+    }).join('');
+
+    const block = document.createElement('div');
+    block.className = 'team-block';
+    block.innerHTML = `
+      <div class="team-row">
+        <span class="team-name">${escapeHtml(team)}<span class="team-basin">${basinLabel}</span></span>
+        <span class="team-bar-wrap">
+          <span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
+          <span class="team-count">${done}/${total}</span>
+        </span>
+        <span class="team-arrow">▶</span>
+      </div>
+      ${weekRowsHtml ? `<div class="team-week-list">${weekRowsHtml}</div>` : ''}
     `;
-    row.onclick = () => openMap(team, plots);
-    body.appendChild(row);
+    block.querySelector('.team-row').onclick = () => openMap(team, plots);
+    body.appendChild(block);
   });
 
   document.getElementById('team-list-card').hidden = sorted.length === 0;
@@ -541,11 +596,18 @@ async function openMap(team, plots) {
       ),
     });
 
+    // 카카오맵 공식 공유 링크 — 모바일에서 카카오맵 앱이 설치돼 있으면
+    // 자동으로 앱을 열고, 없으면 카카오맵 웹으로 연다(카카오 측에서
+    // 이 딥링크 전환을 처리하므로 앱 URL 스킴을 직접 다룰 필요가 없다).
+    const kakaoMapUrl = 'https://map.kakao.com/link/map/'
+      + encodeURIComponent(plot.plotNo || '조사지') + ',' + pos.lat + ',' + pos.lng;
+
     const info = new kakao.maps.InfoWindow({
       content: `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
         <b>${escapeHtml(plot.plotNo || '')}</b>
         ${plot.basin ? ' · ' + escapeHtml(plot.basin) : ''}
         <br>${done ? '✅ 완료' : '⏳ 미완료'}
+        <br><a href="${kakaoMapUrl}" target="_blank" rel="noopener" style="color:#1D9E75;font-weight:700;">📍 카카오맵 앱에서 보기</a>
       </div>`,
     });
     kakao.maps.event.addListener(marker, 'click', () => info.open(currentMap, marker));
