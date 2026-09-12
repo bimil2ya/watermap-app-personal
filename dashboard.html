@@ -103,8 +103,8 @@ body {
 .team-row.active { background: var(--green-light); }
 .team-name { font-weight: 700; font-size: 15.5px; flex-shrink: 0; word-break: break-word; }
 .team-basin { font-weight: 400; font-size: 12.5px; color: var(--text-sub); }
-.team-bar-wrap { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 120px; }
-.team-bar-track { flex: 1; height: 8px; border-radius: 5px; background: var(--gray-bg); overflow: hidden; }
+.team-bar-wrap { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 70px; }
+.team-bar-track { flex: 1; min-width: 24px; height: 8px; border-radius: 5px; background: var(--gray-bg); overflow: hidden; }
 .team-bar-fill { height: 100%; background: var(--green); border-radius: 5px; }
 .team-count { font-size: 13px; color: var(--text-sub); white-space: nowrap; flex-shrink: 0; }
 .team-arrow { color: var(--gray-text); font-size: 14px; flex-shrink: 0; }
@@ -664,8 +664,8 @@ function renderTeamList(teamsData) {
         <span class="team-name">${escapeHtml(team)}<span class="team-basin">${basinLabel}</span></span>
         <span class="team-bar-wrap">
           ${barOrPendingBadge}
+          <span class="team-arrow">▶</span>
         </span>
-        <span class="team-arrow">▶</span>
       </div>
       ${weekRowsHtml ? `<div class="team-week-list">${weekRowsHtml}</div>` : ''}
     `;
