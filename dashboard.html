@@ -583,7 +583,7 @@ function renderTeamList(teamsData) {
 
   const sorted = [...teamsData].sort((a, b) => a.team.localeCompare(b.team, 'ko'));
 
-  sorted.forEach(({ team, plots }) => {
+  sorted.forEach(({ team, plots, removedCount }) => {
     const total = plots.length;
     const done = plots.filter(isDone).length;
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -598,12 +598,20 @@ function renderTeamList(teamsData) {
       </div>`;
     }).join('');
 
-    // 표준지(포인트) 자체가 아직 배정되지 않은 팀 — 출장 전 대기 상태일 수 있다.
-    // 이 경우 "0/0" 진행률 바 대신 대기 중임을 분명히 알리는 배지를 보여준다.
-    const barOrPendingBadge = total > 0
-      ? `<span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
-         <span class="team-count">${done}/${total}</span>`
-      : `<span style="font-size:12.5px;color:var(--warning);background:var(--warning-bg);padding:3px 9px;border-radius:10px;font-weight:700;white-space:nowrap;">포인트 배정 대기 중</span>`;
+    // 표준지(포인트) 자체가 아직 배정되지 않은 팀(출장 전 대기 상태)과, 서버
+    // 응답 형식이 깨져서 전부 걸러진 팀(removedCount > 0)을 구분한다 —
+    // 둘 다 total===0이지만 원인이 다르므로 "배정 대기 중"으로 뭉뚱그리면
+    // 실제로는 데이터 오류인데 "아직 배정 안 함"으로 오인하게 된다.
+    const isMalformed = total === 0 && (removedCount || 0) > 0;
+    let barOrPendingBadge;
+    if (total > 0) {
+      barOrPendingBadge = `<span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
+         <span class="team-count">${done}/${total}</span>`;
+    } else if (isMalformed) {
+      barOrPendingBadge = `<span style="font-size:12.5px;color:var(--danger);background:var(--danger-bg);padding:3px 9px;border-radius:10px;font-weight:700;white-space:nowrap;">⚠️ 데이터 오류 — 관리자 확인 필요</span>`;
+    } else {
+      barOrPendingBadge = `<span style="font-size:12.5px;color:var(--warning);background:var(--warning-bg);padding:3px 9px;border-radius:10px;font-weight:700;white-space:nowrap;">포인트 배정 대기 중</span>`;
+    }
 
     const block = document.createElement('div');
     block.className = 'team-block';
@@ -617,7 +625,7 @@ function renderTeamList(teamsData) {
       </div>
       ${weekRowsHtml ? `<div class="team-week-list">${weekRowsHtml}</div>` : ''}
     `;
-    block.querySelector('.team-row').onclick = () => openMap(team, plots);
+    block.querySelector('.team-row').onclick = () => openMap(team, plots, removedCount);
     body.appendChild(block);
   });
 
@@ -677,7 +685,7 @@ function resetDateFilterToDefault() {
   const dateFilter = document.getElementById('date-filter');
   if (dateFilter) dateFilter.value = '';
 }
-async function openMap(team, plots) {
+async function openMap(team, plots, removedCount) {
   const myToken = ++mapLoadToken; // 이 호출만의 "세대" 식별자 — 함수 진입 즉시 발급
   // 새 호출이 시작된 순간, 이전 호출이 띄워놨을 수 있는 "완료일 확인 중..."
   // 로딩 문구부터 지운다 — 그렇지 않으면 이전 호출이 완료일 조회 도중이었고
@@ -737,11 +745,17 @@ async function openMap(team, plots) {
 
   if (located.length === 0) {
     currentMap = null; // 다음에 위치가 있는 팀을 열 때 지도를 새로 만들어야 하므로 참조를 버린다
-    // 포인트가 아예 배정되지 않은 경우(출장 전 대기 상태)와, 포인트는 있지만
-    // 좌표만 없는 경우를 구분해서 안내한다 — 원인이 다르므로 문구도 다르게.
-    mapEl.innerHTML = plots.length === 0
-      ? '<div class="loading-note">아직 이 팀에 배정된 포인트가 없습니다(포인트 배정 대기 중).</div>'
-      : '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
+    // 포인트가 아예 배정되지 않은 경우(출장 전 대기 상태), 서버 응답 형식이
+    // 깨져서 전부 걸러진 경우, 포인트는 있지만 좌표만 없는 경우를 구분해서
+    // 안내한다 — 원인이 다르므로 문구도 다르게(뭉뚱그리면 실제로는 데이터
+    // 오류인데 "아직 배정 안 함"으로 오인하게 된다).
+    if (plots.length > 0) {
+      mapEl.innerHTML = '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
+    } else if ((removedCount || 0) > 0) {
+      mapEl.innerHTML = '<div class="loading-note">⚠️ 이 팀의 데이터 형식이 올바르지 않아 표시할 포인트가 없습니다. 관리자에게 문의해주세요.</div>';
+    } else {
+      mapEl.innerHTML = '<div class="loading-note">아직 이 팀에 배정된 포인트가 없습니다(포인트 배정 대기 중).</div>';
+    }
     return;
   }
 
