@@ -7028,6 +7028,9 @@ function showToast(msg, type) {
     t.style.display = 'block';
     t.style.opacity = '1';
     const sequence = ++toastSequence;
+    // 오류 메시지는 "왜 저장이 안 됐는지" 같은 실제로 읽고 판단해야 할 정보를
+    // 담고 있어서, 성공/안내 메시지보다 더 오래 띄워둔다.
+    const holdMs = type === 'error' ? 4500 : 1200;
     // setTimeout 콜백은 별도 태스크로 나중에 실행되므로 이 함수를 감싸는 try/catch로는
     // 못 잡는다 — 콜백 각각을 자체적으로 보호해야 진짜로 "절대 던지지 않는" 함수가 된다.
     setTimeout(() => {
@@ -7044,7 +7047,7 @@ function showToast(msg, type) {
       } catch (error) {
         console.error('toast 페이드 처리 실패:', error);
       }
-    }, 2500);
+    }, holdMs);
     return true;
   } catch (error) {
     console.error('toast 표시 실패:', error);
