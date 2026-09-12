@@ -598,14 +598,20 @@ function renderTeamList(teamsData) {
       </div>`;
     }).join('');
 
+    // 표준지(포인트) 자체가 아직 배정되지 않은 팀 — 출장 전 대기 상태일 수 있다.
+    // 이 경우 "0/0" 진행률 바 대신 대기 중임을 분명히 알리는 배지를 보여준다.
+    const barOrPendingBadge = total > 0
+      ? `<span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
+         <span class="team-count">${done}/${total}</span>`
+      : `<span style="font-size:12.5px;color:var(--warning);background:var(--warning-bg);padding:3px 9px;border-radius:10px;font-weight:700;white-space:nowrap;">포인트 배정 대기 중</span>`;
+
     const block = document.createElement('div');
     block.className = 'team-block';
     block.innerHTML = `
       <div class="team-row">
         <span class="team-name">${escapeHtml(team)}<span class="team-basin">${basinLabel}</span></span>
         <span class="team-bar-wrap">
-          <span class="team-bar-track"><span class="team-bar-fill" style="width:${pct}%"></span></span>
-          <span class="team-count">${done}/${total}</span>
+          ${barOrPendingBadge}
         </span>
         <span class="team-arrow">▶</span>
       </div>
@@ -664,6 +670,7 @@ function closeAllInfoWindows() {
   openInfoWindows = [];
   openDateLabels.forEach(overlay => overlay.setMap(null));
   openDateLabels = [];
+  currentMarkers.forEach(m => m.setOpacity(1)); // 날짜 선택으로 흐려졌던 마커를 원래대로 복구
 }
 
 function resetDateFilterToDefault() {
@@ -672,6 +679,11 @@ function resetDateFilterToDefault() {
 }
 async function openMap(team, plots) {
   const myToken = ++mapLoadToken; // 이 호출만의 "세대" 식별자 — 함수 진입 즉시 발급
+  // 새 호출이 시작된 순간, 이전 호출이 띄워놨을 수 있는 "완료일 확인 중..."
+  // 로딩 문구부터 지운다 — 그렇지 않으면 이전 호출이 완료일 조회 도중이었고
+  // 이번 호출이 위치 정보 없음/SDK 로드 실패 등으로 일찍 return하는 경우,
+  // 두 호출 모두 이 문구를 끝내 숨기지 못해 영원히 떠있게 된다(실제 재현됨).
+  document.getElementById('map-loading-note').hidden = true;
   const key = getKakaoKey();
   if (!key) {
     document.getElementById('key-setup').hidden = false;
@@ -725,7 +737,11 @@ async function openMap(team, plots) {
 
   if (located.length === 0) {
     currentMap = null; // 다음에 위치가 있는 팀을 열 때 지도를 새로 만들어야 하므로 참조를 버린다
-    mapEl.innerHTML = '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
+    // 포인트가 아예 배정되지 않은 경우(출장 전 대기 상태)와, 포인트는 있지만
+    // 좌표만 없는 경우를 구분해서 안내한다 — 원인이 다르므로 문구도 다르게.
+    mapEl.innerHTML = plots.length === 0
+      ? '<div class="loading-note">아직 이 팀에 배정된 포인트가 없습니다(포인트 배정 대기 중).</div>'
+      : '<div class="loading-note">이 팀의 표준지에는 위치 정보가 없습니다.</div>';
     return;
   }
 
@@ -751,25 +767,11 @@ async function openMap(team, plots) {
     });
   }
 
-  // 완료일 사전 로딩 — 날짜별 그룹 드롭다운을 만들려면 이 팀의 완료 포인트
-  // 전체의 완료일을 마커를 그리기 전에 먼저 알아야 한다. 이 동안 지도는
-  // 이미 새 팀 위치로 옮겨져 있고, 로딩 중임을 명확히 알리는 문구를 띄운다.
-  mapLoadingNote.hidden = false;
-  const scriptUrl = getScriptUrl();
-  const donePoints = located.filter(({ plot }) => isDone(plot));
-  const dateResults = await Promise.allSettled(
-    donePoints.map(({ plot }) => fetchCompletionDate(scriptUrl, plot.plotNo))
-  );
-  const completionInfoByPlotNo = {};
-  donePoints.forEach(({ plot }, i) => {
-    const r = dateResults[i];
-    if (r.status === 'fulfilled' && r.value) completionInfoByPlotNo[plot.plotNo] = r.value;
-  });
-  if (myToken !== mapLoadToken) return; // 완료일 조회 중 다른 팀이 선택됐으면 여기서 중단
-  mapLoadingNote.hidden = true;
-
+  // 마커는 완료일 조회를 기다리지 않고 즉시 그린다 — "포인트 표시가 느리다"는
+  // 피드백에 따라, 완료일을 전부 모은 뒤에야 마커를 그리던 순서를 되돌렸다.
+  // 날짜별 그룹 드롭다운만 완료일 조회가 끝난 뒤 나중에 채운다.
   const bounds = new kakao.maps.LatLngBounds();
-  const groupsByDate = {}; // { "9/10(목)": { isoDate, items: [{plot, pos, marker, info}, ...] } }
+  const markerEntries = []; // { plot, pos, marker, info, done } — 완료일은 아직 모름
 
   located.forEach(({ plot, pos }) => {
     const done = isDone(plot);
@@ -782,10 +784,8 @@ async function openMap(team, plots) {
       image: getDotMarkerImage(done), // 완료/미완료 두 종류뿐이므로 색상별로 한 번만 만들어 재사용
     });
 
-    // 완료일은 위에서 전부 미리 조회해뒀으므로 그 결과를 꺼내 쓰기만 한다.
-    const dateInfo = completionInfoByPlotNo[plot.plotNo]; // undefined 가능(미완료 또는 조회 실패)
     const info = new kakao.maps.InfoWindow({
-      content: buildInfoContent(plot, pos, done, dateInfo ? dateInfo.label : null),
+      content: buildInfoContent(plot, pos, done, null), // 완료일은 잠시 후 채워진다
     });
 
     kakao.maps.event.addListener(marker, 'click', () => {
@@ -795,15 +795,33 @@ async function openMap(team, plots) {
       openInfoWindows = [info];
     });
 
-    if (dateInfo) {
-      if (!groupsByDate[dateInfo.label]) groupsByDate[dateInfo.label] = { isoDate: dateInfo.isoDate, items: [] };
-      groupsByDate[dateInfo.label].items.push({ plot, pos, marker, info });
-    }
-
     currentMarkers.push(marker);
+    markerEntries.push({ plot, pos, marker, info, done });
   });
 
   currentMap.setBounds(bounds);
+
+  // 완료일 조회는 마커를 다 그린 뒤 백그라운드로 진행한다. 날짜별 그룹
+  // 드롭다운은 이 조회가 끝나야 채울 수 있으므로 그동안은 숨겨두고
+  // (dateFilterRow는 위에서 이미 hidden=true), 지도는 이미 완성된 채로 둔다.
+  mapLoadingNote.hidden = false;
+  const scriptUrl = getScriptUrl();
+  const donePoints = markerEntries.filter(e => e.done);
+  const dateResults = await Promise.allSettled(
+    donePoints.map(e => fetchCompletionDate(scriptUrl, e.plot.plotNo))
+  );
+  if (myToken !== mapLoadToken) return; // 조회 중 다른 팀이 선택됐으면 중단 — 이미 그려진 마커는 그 팀 것이 아니므로 더 손대지 않는다
+  mapLoadingNote.hidden = true;
+
+  const groupsByDate = {}; // { "9/10(목)": { isoDate, items: [{plot, pos, marker, info}, ...] } }
+  donePoints.forEach((entry, i) => {
+    const r = dateResults[i];
+    if (r.status !== 'fulfilled' || !r.value) return;
+    const { label, isoDate } = r.value;
+    entry.info.setContent(buildInfoContent(entry.plot, entry.pos, true, label));
+    if (!groupsByDate[label]) groupsByDate[label] = { isoDate, items: [] };
+    groupsByDate[label].items.push(entry);
+  });
 
   // 날짜 드롭다운 옵션 채우기 — 정렬은 라벨 문자열이 아니라 isoDate 기준으로 한다
   // (포맷된 라벨을 그대로 정렬하면 "10/2"가 "9/9"보다 앞에 오는 등 순서가 틀린다).
@@ -823,11 +841,16 @@ async function openMap(team, plots) {
 
   dateFilterSelect.onchange = (e) => {
     const dateLabel = e.target.value; // closeAllInfoWindows() 호출보다 먼저 읽는다
-    closeAllInfoWindows();
+    closeAllInfoWindows(); // 라벨·정보창 정리 + 모든 마커 opacity를 1로 복구
     if (!dateLabel) return; // "날짜 선택" 기본 옵션으로 되돌아가면 전부 닫은 채로 끝
+    const selectedItems = groupsByDate[dateLabel]?.items || [];
+    // 인접한 포인트가 많으면 라벨이 어느 점 것인지 헷갈리므로, 이 날짜에
+    // 해당하지 않는 마커는 아주 옅게 만들어 라벨이 붙은 점만 눈에 띄게 한다.
+    const selectedMarkers = new Set(selectedItems.map(({ marker }) => marker));
+    currentMarkers.forEach(m => { if (!selectedMarkers.has(m)) m.setOpacity(0.15); });
     // 정보창을 전부 열면 화면이 복잡해지므로, 각 포인트 위에 날짜만 작게
     // 표시하는 라벨(CustomOverlay)을 띄운다 — 어디에 몰려있는지만 보면 된다.
-    (groupsByDate[dateLabel]?.items || []).forEach(({ marker }) => {
+    selectedItems.forEach(({ marker }) => {
       const overlay = new kakao.maps.CustomOverlay({
         position: marker.getPosition(),
         yAnchor: 1.6,
