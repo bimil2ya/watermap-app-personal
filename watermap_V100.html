@@ -2029,6 +2029,10 @@ async function restoreDraft(plotNo) {
       var _existingPhotoMap = {};
       (_existingRec2?.photoList || []).forEach(p => { _existingPhotoMap[p.filename] = p; });
     }
+    // 복원 중 원본을 못 찾은 사진 슬롯 개수 — 4겹(무결성 검증)에서 사용.
+    // IndexedDB가 정리되어 사진만 유실된 채 나머지 정보만 복원되는 상황을
+    // 저장 버튼을 누를 때가 아니라 불러온 즉시 알려준다.
+    let missingPhotoCount = 0;
     if (draft._photoKeys) {
       for (const { k, filename } of draft._photoKeys) {
         let stored = await idbGet(idbOrigKey(plotNo, k)); // 원본 우선
@@ -2039,9 +2043,9 @@ async function restoreDraft(plotNo) {
             stored = cached; // captureId 일치할 때만 신뢰
           }
         }
+        const slot = document.getElementById('photo-slot-' + k);
         if (stored) {
           photoData[k] = { filename };
-          const slot = document.getElementById('photo-slot-' + k);
           if (slot) {
             slot.innerHTML = '';
             const img = document.createElement('img');
@@ -2052,6 +2056,9 @@ async function restoreDraft(plotNo) {
             slot.style.cursor = 'pointer';
             slot.onclick = () => openPhotoSheet('filled', 'photo', Number(k), PHOTO_SLOTS_LABEL[Number(k)]);
           }
+        } else {
+          missingPhotoCount++;
+          if (slot) slot.classList.add('photo-required-error');
         }
       }
     }
@@ -2066,9 +2073,9 @@ async function restoreDraft(plotNo) {
             stored = cached; // captureId 일치할 때만 신뢰
           }
         }
+        const slot = document.getElementById('photo-move-slot-' + k);
         if (stored) {
           movePhotoData[k] = { filename };
-          const slot = document.getElementById('photo-move-slot-' + k);
           if (slot) {
             slot.innerHTML = '';
             const img = document.createElement('img');
@@ -2079,8 +2086,14 @@ async function restoreDraft(plotNo) {
             slot.style.cursor = 'pointer';
             slot.onclick = () => openPhotoSheet('filled', 'move', Number(k), MOVE_PHOTO_SLOTS_LABEL[Number(k)]);
           }
+        } else {
+          missingPhotoCount++;
+          if (slot) slot.classList.add('photo-required-error');
         }
       }
+    }
+    if (missingPhotoCount > 0) {
+      showToast(`⚠️ 사진 ${missingPhotoCount}장의 원본을 찾을 수 없습니다. 표시된 슬롯을 다시 촬영해주세요`, 'error');
     }
     console.log('draft 복원 완료');
     syncAllQuickPickHighlights();
@@ -6541,12 +6554,19 @@ function renderDraftList() {
       : fmt(it.lastEditedAt);
     return `
       <div class="draft-item" data-plotno="${escapeHtml(it.plotNo)}"
-        style="background:var(--white);border:1px solid var(--gray-border);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;">
-        <div style="font-weight:700;font-size:14px;">${escapeHtml(it.plotNo)}</div>
-        <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">
-          필수항목 ${it.requiredFilled}/${it.requiredTotal} · 사진 ${photoDone}/${photoTotal}
+        style="background:var(--white);border:1px solid var(--gray-border);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:14px;">${escapeHtml(it.plotNo)}</div>
+          <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">
+            필수항목 ${it.requiredFilled}/${it.requiredTotal} · 사진 ${photoDone}/${photoTotal}
+          </div>
+          <div style="font-size:11px;color:var(--gray-text);margin-top:2px;">${timeLabel}</div>
+          <div class="draft-missing-warning" style="font-size:11px;color:var(--danger);font-weight:700;margin-top:2px;"></div>
         </div>
-        <div style="font-size:11px;color:var(--gray-text);margin-top:2px;">${timeLabel}</div>
+        <button type="button" class="draft-delete-btn" data-plotno="${escapeHtml(it.plotNo)}"
+          style="flex-shrink:0;background:none;border:1px solid var(--gray-border);color:var(--gray-text);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;">
+          작성 취소
+        </button>
       </div>`;
   }).join('');
 
@@ -6559,6 +6579,59 @@ function renderDraftList() {
       showToast('[' + plotNo + '] 작성 중이던 내용을 불러왔습니다', 'info');
     });
   });
+
+  // "작성 취소" — 3겹(덮어쓰기 가드)을 거치지 않는 명시적 삭제 경로. 반드시
+  // 확인창을 거치고, 자동으로는 절대 삭제하지 않는다(7겹, 위험 H 대응).
+  body.querySelectorAll('.draft-delete-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation(); // 부모 draft-item의 클릭(포인트 이동)으로 번지지 않게
+      const plotNo = btn.getAttribute('data-plotno');
+      if (!confirm('[' + plotNo + '] 작성 중이던 내용을 삭제하시겠습니까?\n(사진 원본은 지워지지 않고, 입력한 텍스트만 삭제됩니다)')) return;
+      localStorage.removeItem(DRAFT_KEY_PREFIX + plotNo);
+      renderDraftList();
+      showToast('[' + plotNo + '] 작성 중이던 내용을 삭제했습니다', 'info');
+    });
+  });
+
+  // 사진 원본 유실 여부는 IndexedDB 조회가 필요해 비동기다 — 목록 자체는
+  // 위에서 이미 즉시 그려지고, 유실 경고만 뒤늦게 채워진다(4겹 무결성 검증).
+  items.forEach(async (it) => {
+    let draft = null;
+    try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY_PREFIX + it.plotNo)); } catch (e) { draft = null; }
+    if (!draft) return;
+    const missing = await countMissingDraftPhotos(it.plotNo, draft);
+    if (missing <= 0) return;
+    const itemEl = body.querySelector('.draft-item[data-plotno="' + CSS.escape(it.plotNo) + '"] .draft-missing-warning');
+    if (itemEl) itemEl.textContent = `⚠️ 사진 ${missing}장 유실`;
+  });
+}
+
+// restoreDraft()의 사진 원본 확인 로직과 동일한 기준(원본 우선, 없으면
+// captureId 일치할 때만 보조 캐시)으로, 실제 슬롯을 그리지 않고 유실 개수만 센다.
+async function countMissingDraftPhotos(plotNo, draft) {
+  const records = getSurveyRecords();
+  const existingRec = records.find(r => r && r.plotNo === plotNo);
+  const existingPhotoMap = {};
+  (existingRec?.photoList || []).forEach(p => { existingPhotoMap[p.filename] = p; });
+
+  async function isPresent(filename, k, origKeyFn, cachePrefix) {
+    let stored = await idbGet(origKeyFn(plotNo, k));
+    if (!stored) {
+      const cached = await idbGet(cachePrefix + k);
+      const prev = existingPhotoMap[filename];
+      if (cached && prev && cached.captureId && cached.captureId === prev.captureId) stored = cached;
+    }
+    return !!stored;
+  }
+
+  let missing = 0;
+  for (const { k, filename } of (draft._photoKeys || [])) {
+    if (!(await isPresent(filename, k, idbOrigKey, 'photo_'))) missing++;
+  }
+  for (const { k, filename } of (draft._movePhotoKeys || [])) {
+    if (!(await isPresent(filename, k, idbMoveOrigKey, 'move_photo_'))) missing++;
+  }
+  return missing;
 }
 
 function renderRecordsList() {
