@@ -1025,6 +1025,14 @@ body.dark-mode #tab-tree table td:first-child {
 <!-- ================= 탭4: 저장목록 ================= -->
 <div class="tab-panel" id="tab-list">
 
+  <!-- 작성 중(미완료) 포인트 목록 -->
+  <div id="draft-list-card" style="display:none;margin-bottom:14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:var(--radius);padding:12px;">
+    <div style="font-weight:800;font-size:14px;color:var(--warning);margin-bottom:8px;">
+      📝 작성 중인 포인트 <span id="draft-list-count">0</span>건
+    </div>
+    <div id="draft-list-body"></div>
+  </div>
+
   <!-- 미전송 항목 선택 전송 -->
   <div id="send-all-bar" style="display:none;margin-bottom:10px;">
     <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-sub);margin-bottom:8px;">
@@ -1905,6 +1913,34 @@ function getDraftKey(plotNo) {
   return DRAFT_KEY_PREFIX + (pn || '_default');
 }
 
+// draft 안에서 '실제로 값이 있는 항목'의 개수 — 빈약함 판정의 유일한 기준.
+// 사진은 draft가 아니라 IndexedDB에 있으므로 여기서는 파일명 목록 길이만 센다.
+function draftContentScore(draft) {
+  if (!draft || typeof draft !== 'object') return -1;
+  let score = 0;
+  Object.entries(draft).forEach(([k, v]) => {
+    if (k.startsWith('_')) return;               // 메타데이터 제외
+    if (typeof v !== 'string') return;
+    if (v.trim() !== '') score++;
+  });
+  score += (draft._photoKeys || []).length;
+  score += (draft._movePhotoKeys || []).length;
+  return score;
+}
+
+// 지금 쓰려는 draft가 기존 draft보다 빈약하면 덮어쓰지 않는다 — 초기화 직후
+// 자동저장이 돌거나, 화면 이탈 시 flush가 빈 폼을 저장하는 사고를 막는다.
+// 의도적으로 비우려면 별도의 명시적 삭제 경로(작성 취소)를 써야 한다.
+function shouldWriteDraft(key, nextDraft) {
+  let prev = null;
+  try { prev = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { prev = null; }
+  if (!prev) return true;                        // 기존 것이 없으면 무조건 쓴다
+  const prevScore = draftContentScore(prev);
+  const nextScore = draftContentScore(nextDraft);
+  if (nextScore >= prevScore) return true;       // 같거나 늘었으면 정상 저장
+  return false;                                  // 줄었으면 덮어쓰지 않는다
+}
+
 // 폼 전체 값을 draft로 저장
 function saveDraft() {
   try {
@@ -1927,8 +1963,16 @@ function saveDraft() {
     }
     draft._photoKeys = Object.entries(photoData).map(([k, v]) => ({ k, filename: v.filename }));
     draft._movePhotoKeys = Object.entries(movePhotoData).map(([k, v]) => ({ k, filename: v.filename }));
+    // 최초 작성 시각은 보존하고, 최종 수정 시각만 매번 갱신한다.
+    const draftKey = getDraftKey();
+    let prevFirst = null;
+    try { prevFirst = JSON.parse(localStorage.getItem(draftKey) || 'null')?._firstEditedAt || null; }
+    catch (e) { prevFirst = null; }
+    draft._firstEditedAt = prevFirst || Date.now();
     draft._savedAt = Date.now();
-    localStorage.setItem(getDraftKey(), JSON.stringify(draft));
+    if (shouldWriteDraft(draftKey, draft)) {
+      localStorage.setItem(draftKey, JSON.stringify(draft));
+    }
   } catch(e) { console.warn('draft 저장 실패', e); }
 }
 
@@ -2806,6 +2850,21 @@ function scheduleDraftSave() {
   clearTimeout(_draftTimer);
   _draftTimer = setTimeout(saveDraft, 1000);
 }
+
+// 앱이 백그라운드로 가거나 페이지가 사라질 때, 대기 중인 1초 디바운스를 기다리지
+// 않고 즉시 확정 저장한다 — 비필수 항목만 입력한 채 이탈하면 디바운스 자체가
+// 걸리지 않을 수 있어(REQUIRED_SOIL/REQUIRED_TREE 필드에만 리스너가 있음),
+// 이 즉시 저장이 유일한 안전망이 되는 경우가 있다.
+// beforeunload는 모바일(특히 iOS)에서 발화가 보장되지 않으므로 쓰지 않는다.
+function flushDraftNow() {
+  clearTimeout(_draftTimer);
+  _draftTimer = null;
+  try { saveDraft(); } catch (e) { console.warn('draft flush 실패', e); }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushDraftNow();
+});
+window.addEventListener('pagehide', flushDraftNow);
 
 // ====== 항목 입력 시 빨간 강조 즉시 해제 ======
 function initFieldClearListeners() {
@@ -6422,7 +6481,88 @@ function toggleSelectAll(checked) {
   renderRecordsList();
 }
 
+// draft 하나의 요약 정보를 만든다. 실제 폼을 건드리지 않고 draft 객체만 읽는다.
+function summarizeDraft(plotNo, draft) {
+  const requiredIds = [...REQUIRED_SOIL, ...REQUIRED_TREE]
+    .map(f => f.id)
+    .filter(id => id !== 'soil-date'); // hidden이라 draft에 애초에 없음 — 분모에서 제외
+  const filled = requiredIds.filter(id => (draft[id] || '').toString().trim() !== '').length;
+  const photoCount = (draft._photoKeys || []).length;
+  const movePhotoCount = (draft._movePhotoKeys || []).length;
+  const moveNeeded = draft['soil-move-need'] === '조사지이동'
+    || draft['radio_soil-move-need'] === '조사지이동';
+  return {
+    plotNo,
+    requiredFilled: filled,
+    requiredTotal: requiredIds.length,
+    photoCount, movePhotoCount, moveNeeded,
+    firstEditedAt: draft._firstEditedAt || draft._savedAt || null,
+    lastEditedAt: draft._savedAt || null,
+  };
+}
+
+// 작성 중(미완료) draft 목록을 저장목록 탭 상단에 렌더링한다.
+function renderDraftList() {
+  const card = document.getElementById('draft-list-card');
+  const body = document.getElementById('draft-list-body');
+  const countEl = document.getElementById('draft-list-count');
+  if (!card || !body || !countEl) return;
+
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
+  const savedPlotNos = new Set(records.map(r => r.plotNo));
+
+  const items = [];
+  Object.keys(localStorage).forEach(key => {
+    if (!key.startsWith(DRAFT_KEY_PREFIX)) return;
+    const plotNo = key.slice(DRAFT_KEY_PREFIX.length);
+    if (!plotNo || plotNo === '_default') return;
+    // 1차 임시 규칙: 정식 레코드가 있으면 시각 비교 없이 무조건 제외한다.
+    // (savedAtMs가 도입되는 3차부터 "레코드보다 최신인 draft"만 다시 노출하도록 정밀화 예정)
+    if (savedPlotNos.has(plotNo)) return;
+    let draft = null;
+    try { draft = JSON.parse(localStorage.getItem(key)); } catch (e) { draft = null; }
+    if (!draft) return;
+    items.push(summarizeDraft(plotNo, draft));
+  });
+
+  items.sort((a, b) => (b.lastEditedAt || 0) - (a.lastEditedAt || 0));
+
+  countEl.textContent = items.length;
+  card.style.display = items.length > 0 ? 'block' : 'none';
+  if (items.length === 0) { body.innerHTML = ''; return; }
+
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+
+  body.innerHTML = items.map(it => {
+    const photoTotal = it.moveNeeded ? 12 + 4 : 12;
+    const photoDone = it.photoCount + (it.moveNeeded ? it.movePhotoCount : 0);
+    const timeLabel = (it.firstEditedAt && it.lastEditedAt && it.firstEditedAt !== it.lastEditedAt)
+      ? `${fmt(it.firstEditedAt)} 시작 → ${fmt(it.lastEditedAt)} 작성 중`
+      : fmt(it.lastEditedAt);
+    return `
+      <div class="draft-item" data-plotno="${escapeHtml(it.plotNo)}"
+        style="background:var(--white);border:1px solid var(--gray-border);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;">
+        <div style="font-weight:700;font-size:14px;">${escapeHtml(it.plotNo)}</div>
+        <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">
+          필수항목 ${it.requiredFilled}/${it.requiredTotal} · 사진 ${photoDone}/${photoTotal}
+        </div>
+        <div style="font-size:11px;color:var(--gray-text);margin-top:2px;">${timeLabel}</div>
+      </div>`;
+  }).join('');
+
+  body.querySelectorAll('.draft-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const plotNo = el.getAttribute('data-plotno');
+      onPlotSelect(plotNo);
+      const soilBtn = document.querySelector('.nav-btn[onclick*="tab-soil"]');
+      switchTab('tab-soil', soilBtn);
+      showToast('[' + plotNo + '] 작성 중이던 내용을 불러왔습니다', 'info');
+    });
+  });
+}
+
 function renderRecordsList() {
+  renderDraftList();
   const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
   const container = document.getElementById('records-list');
   updateSendAllBar();
