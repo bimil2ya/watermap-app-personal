@@ -258,6 +258,11 @@ body {
         <div class="card-header">
           <span>지난 작업 포인트 <span id="past-count-label" style="font-weight:500;color:var(--text-sub);"></span></span>
         </div>
+        <div style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);">
+          <select id="past-team-filter" onchange="openPastPointsMap()" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
+            <option value="">전체 팀</option>
+          </select>
+        </div>
         <div id="past-date-filter-row" style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);" hidden>
           <select id="past-date-filter" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
             <option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>
@@ -1058,11 +1063,27 @@ async function openPastPointsMap() {
     return;
   }
 
+  // 팀 필터 옵션 채우기 — 현재 선택값은 유지한다(다시 열 때마다 "전체 팀"으로
+  // 리셋되면 팀을 골라놓고 새로고침만 했는데 매번 다시 골라야 해서 불편하다).
+  const teamFilterSelect = document.getElementById('past-team-filter');
+  const prevSelectedTeam = teamFilterSelect.value;
+  const sortedTeamNames = allTeamsData.map(t => t.team).sort((a, b) => a.localeCompare(b, 'ko'));
+  teamFilterSelect.innerHTML = '<option value="">전체 팀</option>'
+    + sortedTeamNames.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+  // 이전에 고른 팀이 팀 목록 갱신 후에도 여전히 존재하면 그 선택을 유지한다.
+  if (sortedTeamNames.includes(prevSelectedTeam)) teamFilterSelect.value = prevSelectedTeam;
+  const selectedTeam = teamFilterSelect.value;
+
   const pastPoints = [];
   allTeamsData.forEach(({ team, plots }) => {
+    if (selectedTeam && team !== selectedTeam) return;
     plots.forEach(p => { if (isDone(p)) pastPoints.push({ ...p, _team: team }); });
   });
-  document.getElementById('past-count-label').textContent = '(완료 ' + pastPoints.length + '건)';
+  // textContent 대입이므로 escapeHtml()을 쓰지 않는다 — 이미 이스케이프된 문자열을
+  // textContent에 또 넣으면 "&amp;" 같은 엔티티가 글자 그대로 화면에 찍히는
+  // 이중 이스케이프 버그가 된다(다른 곳에서 실제로 있었던 실수).
+  document.getElementById('past-count-label').textContent =
+    (selectedTeam ? '(' + selectedTeam + ' · 완료 ' : '(완료 ') + pastPoints.length + '건)';
 
   try {
     await loadKakaoSdk(key);
