@@ -555,7 +555,8 @@ async function loadAll(isManualRefresh) {
   loadingNote.hidden = false;
   refreshBtn.disabled = true; // 로딩 중 연타로 요청이 중복 발생하지 않도록
   if (isManualRefresh) {
-    completionDateCache.clear(); // 새로고침은 항상 최신 데이터를 봐야 하므로 캐시 무효화
+    surveyDataCache.clear(); // 새로고침은 항상 최신 데이터를 봐야 하므로 캐시 무효화
+    _allPastPoints = null;   // 지난 작업 포인트도 다음 조회 때 서버에서 다시 받아오게 한다
   } else {
     overviewCard.hidden = true;
     teamListCard.hidden = true;
@@ -613,6 +614,14 @@ async function loadAll(isManualRefresh) {
   } finally {
     loadingNote.hidden = true;
     refreshBtn.disabled = false;
+  }
+
+  // 수동 새로고침을 눌렀을 때 "지난 작업 포인트 보기" 탭을 보고 있었다면 그
+  // 화면도 함께 갱신한다 — 팀별 현황처럼 눈에 보이는 탭이 새로고침 후에도
+  // 그대로 예전 내용으로 남아있으면 새로고침이 안 먹힌 것처럼 보인다.
+  const pastView = document.getElementById('past-view');
+  if (isManualRefresh && pastView && !pastView.hidden) {
+    openPastPointsMap(true);
   }
 }
 
@@ -728,37 +737,40 @@ function escapeHtml(s) {
 // 지도 표시
 // ============================================================
 
-// 완료일(=현장조사 시트의 "조사일") 조회 — getPlots에는 없고 조사지번호별
-// 개별 조회(getSurveyData)로만 얻을 수 있어, 완료된 포인트마다 하나씩 호출한다.
-// 실패해도(네트워크 오류, 그 사이 데이터가 삭제됨 등) 완료일 없이 "완료"만
-// 보여주면 되므로 조용히 null을 반환한다.
-// 완료일 조회 결과를 세션 동안 짧게 캐싱 — 같은 팀을 반복해서 열 때마다
-// 매번 Apps Script를 다시 호출하지 않기 위함. 완료일은 사실상 안 바뀌는
-// 값이지만, 방금 막 현장에서 완료 처리된 조사가 아주 최근에 반영됐을 수
-// 있으므로 TTL을 짧게(5분) 둔다 — 무한 캐싱은 하지 않는다.
-const COMPLETION_DATE_CACHE_TTL_MS = 5 * 60 * 1000;
-const completionDateCache = new Map(); // plotNo -> { value: {label, isoDate} | null, cachedAt }
+// 조사지번호별 현장조사 데이터(soilRow) 조회 — getPlots에는 완료일·좌표·조사자가
+// 없고 조사지번호별 개별 조회(getSurveyData)로만 얻을 수 있어, 완료된 포인트마다
+// 하나씩 호출한다. 완료일(팀별 지도)과 좌표·조사자(지난 작업 포인트 보기) 둘 다
+// 이 하나의 조회 결과(soilRow)에서 나오므로, 캐시도 하나로 공유한다 — 팀별 지도를
+// 먼저 열어본 적이 있으면 지난 작업 포인트 보기에서 그만큼 재조회를 아낀다.
+// 실패해도(네트워크 오류, 그 사이 데이터가 삭제됨 등) 조용히 null을 반환한다 —
+// 그 포인트만 지도에서 빠질 뿐, 나머지 포인트 표시를 막지 않는다.
+// TTL을 짧게(5분) 두는 이유: 이 데이터는 사실상 안 바뀌지만, 방금 막 현장에서
+// 완료 처리된 조사가 아주 최근에 반영됐을 수 있어 무한 캐싱은 하지 않는다.
+const SURVEY_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
+const surveyDataCache = new Map(); // plotNo -> { value: soilRow(array) | null, cachedAt }
 
-async function fetchCompletionDate(scriptUrl, plotNo) {
-  const cached = completionDateCache.get(plotNo);
-  if (cached && Date.now() - cached.cachedAt < COMPLETION_DATE_CACHE_TTL_MS) {
+async function fetchSurveyData(scriptUrl, plotNo) {
+  const cached = surveyDataCache.get(plotNo);
+  if (cached && Date.now() - cached.cachedAt < SURVEY_DATA_CACHE_TTL_MS) {
     return cached.value;
   }
-  let value;
+  let value = null;
   try {
     const data = await fetchJson(scriptUrl + '?action=getSurveyData&plotNo=' + encodeURIComponent(plotNo));
-    if (!data || !Array.isArray(data.soilRow)) {
-      value = null;
-    } else {
-      const isoDate = data.soilRow[3]; // soilRow[3] = 조사일
-      const label = formatKoreanDate(isoDate);
-      value = label ? { label, isoDate } : null;
-    }
+    if (data && Array.isArray(data.soilRow)) value = data.soilRow;
   } catch (e) {
     value = null;
   }
-  completionDateCache.set(plotNo, { value, cachedAt: Date.now() });
+  surveyDataCache.set(plotNo, { value, cachedAt: Date.now() });
   return value;
+}
+
+async function fetchCompletionDate(scriptUrl, plotNo) {
+  const soilRow = await fetchSurveyData(scriptUrl, plotNo);
+  if (!soilRow) return null;
+  const isoDate = soilRow[3]; // soilRow[3] = D열 조사일
+  const label = formatKoreanDate(isoDate);
+  return label ? { label, isoDate } : null;
 }
 
 function buildInfoContent(plot, pos, done, completionDateLabel) {
@@ -1052,33 +1064,87 @@ function buildPastInfoContent(plot, pos, completionDateLabel) {
 // openMap()과 구조가 대부분 같다(로딩 토큰으로 겹친 호출 무시, 마커 먼저 그리고
 // 완료일은 나중에 채우기, 날짜별 그룹 드롭다운) — 다른 점은 팀 하나가 아니라
 // 전체 팀의 "완료" 포인트만 모은다는 것과, 마커가 전부 완료(초록)라는 것뿐이다.
-async function openPastPointsMap() {
+// 지난 작업 포인트 전체(팀 필터 적용 전) 결과를 세션 동안 들고 있는다 — 팀 드롭다운을
+// 바꾸는 정도로는 서버를 다시 조회하지 않고 이미 받아온 결과를 다시 필터링만 한다.
+// null이면 "아직 한 번도 안 받아왔음"이라는 뜻이라, 이 경우에만 실제로 조회한다.
+let _allPastPoints = null; // [{ plotNo, x, y, basin, _team, isoDate }] | null
+
+// "지난 작업 포인트 보기"는 팀별 현황(getPlots, 현재 배정 표준지 목록)과 다른
+// 데이터 소스를 쓴다. getPlots는 관리자가 새 작업 기간을 배정할 때마다 그 기간
+// 것으로 교체되는 "현재 배정 현황"이라, 배정이 아직 안 된 기간에는 지난 실적까지
+// 함께 안 보이는 문제가 있었다(실사용 중 발견). 완료된 조사는 현장조사 시트에
+// 영구히 남으므로, 그 시트를 그대로 읽는 getCompletedPlots(조사지번호 전체) +
+// getSurveyData(번호별 좌표·조사자·조사일)를 조합해 배정 주기와 무관한 누적
+// 실적을 만든다.
+async function fetchAllPastPoints(scriptUrl) {
+  let completedPlotNos = [];
+  try {
+    const data = await fetchJson(scriptUrl + '?action=getCompletedPlots');
+    completedPlotNos = Array.isArray(data.completed)
+      ? data.completed.filter(pn => typeof pn === 'string' && pn.trim() !== '').map(pn => pn.trim())
+      : [];
+  } catch (err) {
+    throw new Error('지난 작업 포인트 목록을 불러오지 못했습니다: ' + err.message);
+  }
+
+  const results = await Promise.allSettled(completedPlotNos.map(pn => fetchSurveyData(scriptUrl, pn)));
+  const points = [];
+  completedPlotNos.forEach((plotNo, i) => {
+    const r = results[i];
+    if (r.status !== 'fulfilled' || !r.value) return; // 조회 실패한 건은 조용히 제외 — 위치를 알 수 없다
+    const soilRow = r.value;
+    points.push({
+      plotNo,
+      x: soilRow[8], y: soilRow[9],           // I~J열 좌표
+      basin: soilRow[1],                       // B열 중유역명
+      _team: (soilRow[6] || '').toString().trim(), // G열 조사책임자(=team_code) — 실제로 조사한 조
+      isoDate: soilRow[3],                     // D열 조사일
+    });
+  });
+  return points;
+}
+
+async function openPastPointsMap(forceRefresh) {
   const myToken = ++pastMapState.loadToken;
-  document.getElementById('past-map-loading-note').hidden = true;
+  document.getElementById('past-map-loading-note').hidden = false;
 
   const key = getKakaoKey();
   if (!key) {
+    document.getElementById('past-map-loading-note').hidden = true;
     document.getElementById('key-setup').hidden = false;
     document.getElementById('key-setup').scrollIntoView({ behavior: 'smooth' });
     return;
   }
 
-  // 팀 필터 옵션 채우기 — 현재 선택값은 유지한다(다시 열 때마다 "전체 팀"으로
-  // 리셋되면 팀을 골라놓고 새로고침만 했는데 매번 다시 골라야 해서 불편하다).
+  if (forceRefresh || _allPastPoints === null) {
+    try {
+      _allPastPoints = await fetchAllPastPoints(getScriptUrl());
+    } catch (err) {
+      if (myToken !== pastMapState.loadToken) return;
+      document.getElementById('past-map-loading-note').hidden = true;
+      document.getElementById('error-note').textContent = err.message;
+      document.getElementById('error-note').hidden = false;
+      return;
+    }
+  }
+  if (myToken !== pastMapState.loadToken) return;
+
+  // 팀 필터 옵션 채우기 — 실제로 완료 기록이 있는 팀만 나열한다(getPlots의 "현재
+  // 배정" 목록이 아니라 이 데이터 자체에서 뽑으므로, 배정 여부와 무관하다).
+  // 현재 선택값은 유지한다(다시 열 때마다 "전체 팀"으로 리셋되면 매번 다시 골라야
+  // 해서 불편하다).
   const teamFilterSelect = document.getElementById('past-team-filter');
   const prevSelectedTeam = teamFilterSelect.value;
-  const sortedTeamNames = allTeamsData.map(t => t.team).sort((a, b) => a.localeCompare(b, 'ko'));
+  const sortedTeamNames = [...new Set(_allPastPoints.map(p => p._team).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
   teamFilterSelect.innerHTML = '<option value="">전체 팀</option>'
     + sortedTeamNames.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
-  // 이전에 고른 팀이 팀 목록 갱신 후에도 여전히 존재하면 그 선택을 유지한다.
   if (sortedTeamNames.includes(prevSelectedTeam)) teamFilterSelect.value = prevSelectedTeam;
   const selectedTeam = teamFilterSelect.value;
 
-  const pastPoints = [];
-  allTeamsData.forEach(({ team, plots }) => {
-    if (selectedTeam && team !== selectedTeam) return;
-    plots.forEach(p => { if (isDone(p)) pastPoints.push({ ...p, _team: team }); });
-  });
+  const pastPoints = selectedTeam
+    ? _allPastPoints.filter(p => p._team === selectedTeam)
+    : _allPastPoints;
   // textContent 대입이므로 escapeHtml()을 쓰지 않는다 — 이미 이스케이프된 문자열을
   // textContent에 또 넣으면 "&amp;" 같은 엔티티가 글자 그대로 화면에 찍히는
   // 이중 이스케이프 버그가 된다(다른 곳에서 실제로 있었던 실수).
@@ -1089,11 +1155,13 @@ async function openPastPointsMap() {
     await loadKakaoSdk(key);
   } catch (err) {
     if (myToken !== pastMapState.loadToken) return;
+    document.getElementById('past-map-loading-note').hidden = true;
     document.getElementById('error-note').textContent = err.message;
     document.getElementById('error-note').hidden = false;
     return;
   }
   if (myToken !== pastMapState.loadToken) return;
+  document.getElementById('past-map-loading-note').hidden = true;
 
   const located = [];
   let noCoordCount = 0;
@@ -1113,7 +1181,6 @@ async function openPastPointsMap() {
 
   const mapEl = document.getElementById('past-map');
   const dateFilterRow = document.getElementById('past-date-filter-row');
-  const mapLoadingNote = document.getElementById('past-map-loading-note');
   const pastDateFilterSelect = document.getElementById('past-date-filter');
   if (pastMapState.markers.length) {
     pastMapState.markers.forEach(m => m.setMap(null));
@@ -1125,7 +1192,17 @@ async function openPastPointsMap() {
 
   if (located.length === 0) {
     pastMapState.map = null;
-    mapEl.innerHTML = '<div class="loading-note">아직 완료된 포인트가 없습니다.</div>';
+    // 원인이 다른 세 경우를 구분한다 — 뭉뚱그리면 "완료된 게 아예 없다"로
+    // 오인하기 쉽다(실제로는 좌표만 없거나, 그 팀만 아직 없는 경우일 수 있다).
+    let msg;
+    if (_allPastPoints.length === 0) {
+      msg = '아직 완료된 포인트가 없습니다.';
+    } else if (pastPoints.length === 0) {
+      msg = selectedTeam + '에서 완료한 포인트가 없습니다.';
+    } else {
+      msg = '완료된 포인트는 있지만 좌표 정보가 없어 지도에 표시할 수 없습니다.';
+    }
+    mapEl.innerHTML = '<div class="loading-note">' + escapeHtml(msg) + '</div>';
     return;
   }
 
@@ -1144,13 +1221,18 @@ async function openPastPointsMap() {
     });
   }
 
+  // 조사일은 이미 pastPoints를 만들 때(fetchAllPastPoints) 함께 받아둔 값이라
+  // (soilRow[3]), 팀별 지도(openMap)처럼 마커를 그린 뒤 완료일만 따로 다시
+  // 조회할 필요가 없다 — 마커와 날짜 그룹을 한 번에 만든다.
   const bounds = new kakao.maps.LatLngBounds();
   const markerEntries = [];
+  const groupsByDate = {};
   located.forEach(({ plot, pos }) => {
     const position = new kakao.maps.LatLng(pos.lat, pos.lng);
     bounds.extend(position);
+    const label = formatKoreanDate(plot.isoDate);
     const marker = new kakao.maps.Marker({ position, map: pastMapState.map, image: getDotMarkerImage(true) });
-    const info = new kakao.maps.InfoWindow({ content: buildPastInfoContent(plot, pos, null) });
+    const info = new kakao.maps.InfoWindow({ content: buildPastInfoContent(plot, pos, label) });
     kakao.maps.event.addListener(marker, 'click', () => {
       closeAllPastInfoWindows();
       pastDateFilterSelect.value = '';
@@ -1158,31 +1240,14 @@ async function openPastPointsMap() {
       pastMapState.infoWindows = [info];
     });
     pastMapState.markers.push(marker);
-    markerEntries.push({ plot, pos, marker, info });
+    const entry = { plot, pos, marker, info };
+    markerEntries.push(entry);
+    if (label) {
+      if (!groupsByDate[label]) groupsByDate[label] = { isoDate: plot.isoDate, items: [] };
+      groupsByDate[label].items.push(entry);
+    }
   });
   pastMapState.map.setBounds(bounds);
-
-  // 완료일은 getPlots에 없고 조사지번호별 개별 조회(getSurveyData)로만 얻을 수
-  // 있다 — 팀별 지도(openMap)와 같은 fetchCompletionDate()·5분 캐시를 그대로
-  // 재사용하므로, 이미 어떤 팀의 지도를 열어본 적이 있다면 그만큼은 캐시로
-  // 즉시 채워진다. 마커는 이 조회를 기다리지 않고 이미 다 그려진 상태다.
-  mapLoadingNote.hidden = false;
-  const scriptUrl = getScriptUrl();
-  const dateResults = await Promise.allSettled(
-    markerEntries.map(e => fetchCompletionDate(scriptUrl, e.plot.plotNo))
-  );
-  if (myToken !== pastMapState.loadToken) return;
-  mapLoadingNote.hidden = true;
-
-  const groupsByDate = {};
-  markerEntries.forEach((entry, i) => {
-    const r = dateResults[i];
-    if (r.status !== 'fulfilled' || !r.value) return;
-    const { label, isoDate } = r.value;
-    entry.info.setContent(buildPastInfoContent(entry.plot, entry.pos, label));
-    if (!groupsByDate[label]) groupsByDate[label] = { isoDate, items: [] };
-    groupsByDate[label].items.push(entry);
-  });
 
   const sortedLabels = Object.keys(groupsByDate).sort(
     (a, b) => new Date(groupsByDate[a].isoDate) - new Date(groupsByDate[b].isoDate)
