@@ -1784,6 +1784,9 @@ function openIDB() {
     };
     req.onsuccess = e => { _idb = e.target.result; resolve(_idb); };
     req.onerror   = e => reject(e.target.error);
+    // 다른 탭이 같은 DB를 열어 두면 upgrade가 막혀 이 이벤트가 뜬다. 처리하지 않으면
+    // 이 Promise가 영원히 대기해, 이걸 기다리는 코드(2겹-B 병합)가 통째로 멎는다.
+    req.onblocked = () => reject(new Error('IDB blocked'));
   });
 }
 async function idbSet(key, value) {
@@ -1813,6 +1816,9 @@ async function idbDelete(key) {
     tx.onerror = e => reject(e.target.error);
   });
 }
+// 스토어 전체를 비운다 — draft 미러(`draft_*` 키, 2겹-B)까지 함께 날아간다.
+// 사진만 지우려면 idbKeys()로 접두사 기반 선택 삭제를 쓸 것.
+// (현재 파일에 이 함수의 호출부는 없다 — 새로 추가할 때 이 주석을 지우지 말 것.)
 async function idbClear() {
   const db = await openIDB();
   return new Promise((resolve, reject) => {
@@ -1820,6 +1826,17 @@ async function idbClear() {
     tx.objectStore('photos').clear();
     tx.oncomplete = resolve;
     tx.onerror = e => reject(e.target.error);
+  });
+}
+
+// IDB의 키 목록을 접두사로 걸러 돌려준다. 2겹-B의 병합이 이것 없이는 성립하지 않는다
+// — localStorage가 통째로 정리된 상황에서 어떤 키를 조회해야 하는지 알 방법이 없기 때문.
+async function idbKeys(prefix) {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction('photos', 'readonly').objectStore('photos').getAllKeys();
+    req.onsuccess = e => resolve((e.target.result || []).filter(k => String(k).startsWith(prefix)));
+    req.onerror   = e => reject(e.target.error);
   });
 }
 
@@ -1956,6 +1973,38 @@ function trashKeyOf(draftKey, slot) {
   return TRASHED_DRAFT_PREFIX + draftKey.slice(DRAFT_KEY_PREFIX.length) + (slot || '');
 }
 
+// ====== 2겹-B: draft를 IndexedDB에도 미러링 (localStorage 정리 대비) ======
+// 쓰기 유실과 삭제 유실은 피해가 다르다 — 쓰기가 유실되면 미러가 낡을 뿐이라
+// 병합(최신 우선)에서 버려져 무해하지만, 삭제가 유실되면 지운 draft가 되살아난다.
+// 그래서 삭제는 idbDelete가 아니라 '묘비(tombstone)'로 표현한다 — 쓰기 한 종류만
+// 남으면 순서가 자연히 보장되고, 커밋 안 돼도 '낡은 본문'이 남을 뿐이라 안전하다.
+
+let _mirrorFailCount = 0;
+const MIRROR_FAIL_ALERT_THRESHOLD = 5; // 연속 실패가 이 횟수를 넘으면 한 번만 알린다
+
+// 절대 throw하지 않고, 절대 기다리지 않는다 — 미러 실패가 본 저장을 망치면 안 된다.
+function mirrorDraftToIDB(draftKey, payload) {
+  const plotNo = draftKey.slice(DRAFT_KEY_PREFIX.length);
+  idbSet('draft_' + plotNo, payload)
+    .then(() => { _mirrorFailCount = 0; })
+    .catch(e => {
+      console.warn('draft 미러 실패', e);
+      _mirrorFailCount++;
+      if (_mirrorFailCount === MIRROR_FAIL_ALERT_THRESHOLD) {
+        showToast('보조 저장(2중화)이 계속 실패하고 있습니다', 'error');
+      }
+    });
+}
+
+// 삭제를 '쓰기'로 표현한다. 인자는 plotNo가 아니라 실제로 지운 localStorage 키다 —
+// getDraftKey()는 trim하지 않아 plotNo로 재조립하면 공백 섞인 키에서 표기가 갈려
+// '지운 쪽의 미러가 그대로 살아남는' 사고가 난다(§4.6.1 A-1과 같은 유형).
+function tombstoneDraftInIDB(draftKey) {
+  const plotNo = draftKey.slice(DRAFT_KEY_PREFIX.length);
+  idbSet('draft_' + plotNo, JSON.stringify({ _deletedAt: Date.now() }))
+    .catch(e => console.warn('draft 묘비 기록 실패', e));
+}
+
 // 만료분 정리. TRASHED_DRAFT_PREFIX로 시작하는 키만 건드린다.
 // ※ 이 접두사를 한 글자라도 잘못 적으면 활성 draft가 전부 지워진다.
 function purgeExpiredTrashedDrafts() {
@@ -1969,6 +2018,33 @@ function purgeExpiredTrashedDrafts() {
       }
     } catch (e) { localStorage.removeItem(k); } // 파싱 불가 = 복구 가치 없음
   });
+}
+
+// 2슬롯(최신 ''/직전 '__prev') 밀어내기를 수행한다. trashDraft()와 4차의
+// stashLoserToTrash()가 함께 쓴다(규칙이 두 군데로 갈리면 안 된다).
+// 절대 throw하지 않고 boolean만 반환한다 — 호출부(특히 trashDraft())가 이 값으로
+// 원본을 지울지 말지를 정하므로, throw하면 그 판단이 예외로 새서 폼이 반쯤
+// 채워진 채 남는 사고로 이어진다.
+function pushTrashSlot(draftKey, body) {
+  const curKey = trashKeyOf(draftKey, '');
+  const prevKey = trashKeyOf(draftKey, '__prev');
+  const curBefore = localStorage.getItem(curKey);
+  const prevBefore = localStorage.getItem(prevKey);
+  try {
+    // 최신 슬롯을 직전 슬롯으로 밀고 최신 슬롯에 새로 쓴다.
+    // 메아리가 뚫고 들어오더라도 직전 슬롯에 진짜 편집분이 남는다(2중 방어).
+    if (curBefore !== null) localStorage.setItem(prevKey, curBefore);
+    localStorage.setItem(curKey, body);
+    return true;
+  } catch (e) {
+    // 밀어내기만 성공하고 본 기록이 실패하면 __prev에 중복본만 남는다. 되돌린다.
+    try {
+      if (prevBefore === null) localStorage.removeItem(prevKey);
+      else localStorage.setItem(prevKey, prevBefore);
+    } catch (e2) {}
+    console.warn('draft 유예 보관 실패 — 원본을 그대로 둔다', e);
+    return false;
+  }
 }
 
 // 탈락한 draft를 유예 보관소로 옮긴다.
@@ -1991,26 +2067,10 @@ function trashDraft(plotNo) {
     ? JSON.stringify(Object.assign({}, payload, { _trashedAt: Date.now() }))
     : JSON.stringify({ _trashedAt: Date.now(), _rawUnparsed: raw });
 
-  const curKey = trashKeyOf(key, '');
-  const prevKey = trashKeyOf(key, '__prev');
-  const curBefore = localStorage.getItem(curKey);
-  const prevBefore = localStorage.getItem(prevKey);
-  try {
-    // 최신 슬롯을 직전 슬롯으로 밀고 최신 슬롯에 새로 쓴다.
-    // 메아리가 뚫고 들어오더라도 직전 슬롯에 진짜 편집분이 남는다(2중 방어).
-    if (curBefore !== null) localStorage.setItem(prevKey, curBefore);
-    localStorage.setItem(curKey, body);
-  } catch (e) {
-    // 밀어내기만 성공하고 본 기록이 실패하면 __prev에 중복본만 남는다. 되돌린다.
-    try {
-      if (prevBefore === null) localStorage.removeItem(prevKey);
-      else localStorage.setItem(prevKey, prevBefore);
-    } catch (e2) {}
-    console.warn('draft 유예 보관 실패 — 원본을 그대로 둔다', e);
-    return null;                        // 원본은 절대 지우지 않는다
-  }
+  if (!pushTrashSlot(key, body)) return null;   // 실패 — 원본은 절대 지우지 않는다
   localStorage.removeItem(key);         // 보관에 성공한 뒤에만 원본을 비운다
-  return curKey;
+  tombstoneDraftInIDB(key);             // 미러에도 삭제를 반영한다(2겹-B) — 보관본 자체는 미러하지 않는다
+  return trashKeyOf(key, '');           // pushTrashSlot()이 쓴 것과 동일한 계산 — 재호출 비용 없음
 }
 
 // 유예 보관본을 활성 draft로 되돌린다. trashKey는 trashDraft()의 반환값이나
@@ -2031,6 +2091,7 @@ function restoreTrashedDraft(trashKey) {
     }
     localStorage.setItem(draftKey, body);
     localStorage.removeItem(trashKey);
+    mirrorDraftToIDB(draftKey, body);   // 되살린 본문을 미러에도 다시 쓴다(2겹-B)
     return true;
   } catch (e) { console.warn('유예 보관본 복구 실패', e); return false; }
 }
@@ -2047,6 +2108,131 @@ function evictOldestTrashedDraft() {
   });
   if (oldestKey) { localStorage.removeItem(oldestKey); return true; }
   return false;
+}
+
+// ====== 2겹-B: 두 저장소 병합 — "최신 우선 + 이상징후 경고" ======
+// 반환: { pick: 'local' | 'idb' | 'ask' | 'none', local, idb }
+function chooseDraftSource(localRaw, idbRaw) {
+  const parse = (raw) => { try { return raw ? JSON.parse(raw) : null; } catch (e) { return null; } };
+  const L = parse(localRaw), I = parse(idbRaw);
+
+  // 둘 다 못 읽었다 = 판단 불가. 호출부는 '아무것도 하지 않는다'
+  // (기존 localStorage 원문을 지우지 않는다 — 3차의 _rawUnparsed 본문이 여기로 온다).
+  if (!L && !I) return { pick: 'none', local: null, idb: null };
+
+  // 묘비 처리: 묘비보다 최신인 local이 없으면 '삭제된 것'이 맞다.
+  if (I && I._deletedAt) {
+    if (L && (L._savedAt || 0) > I._deletedAt) return { pick: 'local', local: L, idb: I };
+    return { pick: 'none', local: L, idb: I };
+  }
+
+  // _savedAt이 없는 본문은 restoreDraft()가 곧바로 탈락시키므로 채택하지 않는다.
+  const usableL = L && L._savedAt ? L : null;
+  const usableI = I && I._savedAt ? I : null;
+  if (!usableL && !usableI) return { pick: 'none', local: L, idb: I };
+  if (!usableI) return { pick: 'local', local: L, idb: I };
+  if (!usableL) return { pick: 'idb',   local: L, idb: I };
+
+  const lt = usableL._savedAt, it = usableI._savedAt;
+  if (lt === it) return { pick: 'local', local: L, idb: I }; // 같은 시각 = 같은 내용
+
+  const newerIsLocal = lt > it;
+  const newer = newerIsLocal ? usableL : usableI;
+  const older = newerIsLocal ? usableI : usableL;
+
+  // 이상징후: 최신 쪽이 비정상적으로 비어 있으면 자동 채택하지 않는다.
+  // "지워서 줄어든 것"과 "쓰다 만 기록"은 내용만으로 구분할 수 없으므로,
+  // 정상적인 삭제로는 잘 나오지 않는 폭일 때만 이상징후로 본다.
+  const ns = draftContentScore(newer), os = draftContentScore(older);
+  const suspicious = (ns === 0 && os > 0) || (os > 0 && ns < os * 0.5);
+  if (suspicious) return { pick: 'ask', local: L, idb: I };
+
+  return { pick: newerIsLocal ? 'local' : 'idb', local: L, idb: I };
+}
+
+// 어긋난 쪽 중 탈락한 본문을 유예 보관소에 넣는다(기동 중에는 확인창을 띄우지 않으므로
+// — chooseDraftSource()가 'ask'를 돌려줘도 여기서 조용히 처리한다).
+// draftKey는 이 plotNo의 표준 localStorage 키(mergeDraftMirrors()가 실제 저장된 키에서
+// 뽑은 plotNo로 조립하므로 trim 불일치가 생기지 않는다 — trashDraft() 내부 검색과는 다르다).
+function stashLoserToTrash(plotNo, loserRaw, draftKey) {
+  if (!loserRaw || plotNo === '_default') return;   // _default는 복구 경로가 자동복원뿐이라 보관 무의미
+
+  let d = null; try { d = JSON.parse(loserRaw); } catch (e) { d = null; }
+  const winnerRaw = localStorage.getItem(draftKey);
+  let w = null; try { w = winnerRaw ? JSON.parse(winnerRaw) : null; } catch (e) {}
+
+  // 중복 방지: 이미 같은 _savedAt으로 보관돼 있으면 다시 넣지 않는다.
+  const existing = localStorage.getItem(TRASHED_DRAFT_PREFIX + plotNo);
+  let ex = null; try { ex = existing ? JSON.parse(existing) : null; } catch (e) {}
+  if (ex && d && ex._savedAt === d._savedAt) return;
+
+  const body = d
+    ? JSON.stringify(Object.assign({}, d, { _trashedAt: Date.now() }))
+    : JSON.stringify({ _trashedAt: Date.now(), _rawUnparsed: loserRaw });
+  const ok = pushTrashSlot(draftKey, body);
+  if (ok && w) {
+    // 채택된 쪽에 표시를 남긴다 — 1겹 목록이 "두 저장소 내용이 달랐다"를 보여줄 수 있게.
+    // '_'로 시작하므로 draftContentScore()의 점수 계산에는 영향을 주지 않는다.
+    w._mirrorConflictAt = Date.now();
+    try { localStorage.setItem(draftKey, JSON.stringify(w)); } catch (e) {}
+  }
+}
+
+// 앱 시작 시 딱 한 번, IDB 미러 전용 draft를 localStorage로 승격시킨다. 이후로는
+// 기존 동기 코드(onPlotSelect의 5겹 분기, trashDraft() 등)가 전부 localStorage만
+// 보면 되므로 3차 로직과의 충돌면이 사라진다.
+async function mergeDraftMirrors() {
+  let keys = [];
+  try { keys = await idbKeys('draft_'); } catch (e) { console.warn('미러 키 조회 실패', e); return; }
+  const plotNos = new Set([
+    ...keys.map(k => k.slice('draft_'.length)),
+    ...Object.keys(localStorage).filter(k => k.startsWith(DRAFT_KEY_PREFIX))
+                                .map(k => k.slice(DRAFT_KEY_PREFIX.length)),
+  ]);
+  for (const plotNo of plotNos) {
+    const lsKey = DRAFT_KEY_PREFIX + plotNo;
+    let idbRaw = null;
+    try { idbRaw = await idbGet('draft_' + plotNo); } catch (e) { continue; }
+    const r = chooseDraftSource(localStorage.getItem(lsKey), idbRaw);
+    // 'ask'도 기동 중에는 묻지 않고 최신 쪽을 채택한다. 탈락한 쪽은 유예 보관소로.
+    const adopt = (r.pick === 'ask')
+      ? ((r.local?._savedAt || 0) >= (r.idb?._savedAt || 0) ? 'local' : 'idb')
+      : r.pick;
+    const loserRaw = r.pick === 'ask'
+      ? (adopt === 'local' ? idbRaw : localStorage.getItem(lsKey))
+      : null;
+
+    // stash는 반드시 채택 쓰기가 '성공'한 뒤에 한다. 먼저 하면 쓰기가 실패했을 때
+    // 어긋남이 그대로 남아 다음 기동에도 같은 divergence로 다시 stash되어, 2슬롯이
+    // 같은 내용의 중복본으로 채워지고 5겹에서 만든 진짜 보관본을 밀어낼 수 있다.
+    if (adopt === 'idb') {
+      try { localStorage.setItem(lsKey, idbRaw); }
+      catch (e) { console.warn('승격 실패', plotNo, e); continue; }   // 이 키만 건너뛴다. 재시도하지 않는다 — 미러는 남아 있으니 손실이 아니다
+      if (loserRaw) stashLoserToTrash(plotNo, loserRaw, lsKey);
+    } else if (adopt === 'local') {
+      // mirrorDraftToIDB()는 fire-and-forget이라 커밋 여부를 알 수 없다. 'ask'가 나온
+      // 경우(드물다)에 한해서만 커밋을 확인한 뒤 stash한다 — 매 기동 도는 일반 쓰기까지
+      // 여기서 await하면 병합 전체가 느려진다.
+      if (loserRaw) {
+        try { await idbSet('draft_' + plotNo, localStorage.getItem(lsKey)); stashLoserToTrash(plotNo, loserRaw, lsKey); }
+        catch (e) { console.warn('미러 갱신 실패 — stash 보류', plotNo, e); }
+      } else {
+        mirrorDraftToIDB(lsKey, localStorage.getItem(lsKey));
+      }
+    } else {
+      // pick === 'none': 기존 원문을 지우지 않는다. 다만 살아 있는 본문이 있으면
+      // 묘비를 본문으로 덮어 미러 보호가 끊기지 않게 한다.
+      const raw = localStorage.getItem(lsKey);
+      let d = null; try { d = raw ? JSON.parse(raw) : null; } catch (e) {}
+      if (d && d._savedAt) {
+        mirrorDraftToIDB(lsKey, raw);
+      } else if (r.idb && r.idb._deletedAt && Date.now() - r.idb._deletedAt > TRASHED_DRAFT_TTL_MS) {
+        // 7겹 수명 관리: TTL을 넘긴 묘비만 실제로 제거한다. 이 시점엔 이미 오래 전에
+        // 커밋된 묘비이므로 삭제가 유실돼도 무해하다(유예 보관과 같은 14일 TTL을 쓴다).
+        idbDelete('draft_' + plotNo).catch(() => {});
+      }
+    }
+  }
 }
 
 // 레코드로 폼을 덮은 직후부터 '사용자가 실제로 손대기 전'까지 암묵적 저장을 잠근다.
@@ -2101,6 +2287,10 @@ function saveDraft() {
           throw e;
         }
       }
+      // localStorage 쓰기가 여기까지 왔다는 건 (재시도 경로 포함) 성공했다는 뜻이다.
+      // try/catch 바깥이 아니라 '이 지점'에 두는 이유: 첫 setItem 아래에 두면
+      // quota 재시도 경로에서 미러가 누락된다(1차 검토 지적) — 이 자리는 둘 다 덮는다.
+      mirrorDraftToIDB(draftKey, payload);
     }
   } catch(e) {
     console.warn('draft 저장 실패', e);
@@ -2375,7 +2565,9 @@ async function downloadPhotosAsZip(plotNo, onlyNew = false) {
 
 // draft 삭제
 function clearDraft() {
-  localStorage.removeItem(getDraftKey());
+  const key = getDraftKey();
+  localStorage.removeItem(key);
+  tombstoneDraftInIDB(key);   // 미러에도 삭제를 반영한다(2겹-B) — 부활 방지
 }
 
 // ====== 저장된 조사지 불러오기 ======
@@ -2557,25 +2749,36 @@ document.addEventListener('DOMContentLoaded', () => {
   // 유예 보관분 중 14일이 지난 것 정리 (이미 버려진 데이터만 건드린다)
   purgeExpiredTrashedDrafts();
   // draft 복원 (앱 재시작 시 이전 작업 상태 복원)
-  // 앱 시작 시 가장 최근 draft 복원
-  const allDraftKeys = Object.keys(localStorage).filter(k => k.startsWith(DRAFT_KEY_PREFIX));
-  let latestKey = null, latestTime = 0;
-  allDraftKeys.forEach(k => {
-    try {
-      const d = JSON.parse(localStorage.getItem(k));
-      if (d && d._savedAt && d._savedAt > latestTime) {
-        latestTime = d._savedAt;
-        latestKey = k;
-      }
-    } catch(e) {}
-  });
-  const latestPlotNo = latestKey ? latestKey.replace(DRAFT_KEY_PREFIX, '') : null;
-  restoreDraft(latestPlotNo).then(restored => {
-    if (restored) showToast('이전 작업 내용이 복원되었습니다', 'info');
-    // 전송은 자동으로 하지 않음 — 저장목록 탭의 "미전송 N건 전송" 버튼으로만 실행
-    // 앱 시작 시 완료 목록 자동 갱신
-    setTimeout(() => syncCompletedPlots(), 3000);
-  });
+  // 2겹-B: IDB 미러 전용 draft를 localStorage로 승격시킨 뒤에 자동복원해야 화면에
+  // 나타난다. 다만 기동 자체를 IDB에 묶지 않는다 — 승격이 3초 안에 안 끝나거나
+  // IDB가 막혀 있어도(openIDB의 onblocked) 자동복원은 반드시 실행된다. 그 외
+  // 기동 코드(팀코드·loadPlotPoints 등, 이 블록 아래)는 이 대기와 무관하게 동기로
+  // 계속 진행된다 — IDB가 죽어도 앱은 정상 기동한다.
+  Promise.race([
+    mergeDraftMirrors(),
+    new Promise(r => setTimeout(r, 3000)),
+  ]).catch(e => console.warn('미러 병합 실패', e))
+    .finally(() => {
+      // 앱 시작 시 가장 최근 draft 복원
+      const allDraftKeys = Object.keys(localStorage).filter(k => k.startsWith(DRAFT_KEY_PREFIX));
+      let latestKey = null, latestTime = 0;
+      allDraftKeys.forEach(k => {
+        try {
+          const d = JSON.parse(localStorage.getItem(k));
+          if (d && d._savedAt && d._savedAt > latestTime) {
+            latestTime = d._savedAt;
+            latestKey = k;
+          }
+        } catch(e) {}
+      });
+      const latestPlotNo = latestKey ? latestKey.replace(DRAFT_KEY_PREFIX, '') : null;
+      restoreDraft(latestPlotNo).then(restored => {
+        if (restored) showToast('이전 작업 내용이 복원되었습니다', 'info');
+        // 전송은 자동으로 하지 않음 — 저장목록 탭의 "미전송 N건 전송" 버튼으로만 실행
+        // 앱 시작 시 완료 목록 자동 갱신
+        setTimeout(() => syncCompletedPlots(), 3000);
+      });
+    });
   updateOnlineStatus();
   updateSyncBadge();
 
@@ -6810,6 +7013,9 @@ function summarizeDraft(plotNo, draft) {
     photoCount, movePhotoCount, moveNeeded,
     firstEditedAt: draft._firstEditedAt || draft._savedAt || null,
     lastEditedAt: draft._savedAt || null,
+    // 2겹-B 병합에서 두 저장소 내용이 달라 자동으로 한쪽을 골랐다는 표시(stashLoserToTrash).
+    // 사용자가 이 draft를 한 번이라도 편집해 저장하면 다음 saveDraft()에서 자연히 사라진다.
+    mirrorConflict: !!draft._mirrorConflictAt,
   };
 }
 
@@ -6888,6 +7094,7 @@ function renderDraftList() {
           </div>
           <div style="font-size:11px;color:var(--gray-text);margin-top:2px;">${timeLabel}</div>
           <div class="draft-missing-warning" style="font-size:11px;color:var(--danger);font-weight:700;margin-top:2px;"></div>
+          ${it.mirrorConflict ? '<div class="draft-mirror-conflict-warning" style="font-size:11px;color:var(--gray-text);margin-top:2px;">⚠️ 두 저장소 내용이 달라 자동으로 최신 쪽을 선택했습니다</div>' : ''}
         </div>
         <button type="button" class="draft-delete-btn" data-plotno="${escapeHtml(it.plotNo)}"
           style="flex-shrink:0;background:none;border:1px solid var(--gray-border);color:var(--gray-text);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;">
@@ -6957,6 +7164,7 @@ function renderDraftList() {
       const plotNo = btn.getAttribute('data-plotno');
       if (!confirm('[' + plotNo + '] 작성 중이던 내용을 삭제하시겠습니까?\n(사진 원본은 지워지지 않고, 입력한 텍스트만 삭제됩니다)')) return;
       localStorage.removeItem(DRAFT_KEY_PREFIX + plotNo);
+      tombstoneDraftInIDB(DRAFT_KEY_PREFIX + plotNo);   // 미러에도 삭제를 반영한다(2겹-B)
       renderDraftList();
       showToast('[' + plotNo + '] 작성 중이던 내용을 삭제했습니다', 'info');
     });
