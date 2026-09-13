@@ -1098,6 +1098,31 @@ async function mapWithConcurrency(items, limit, fn) {
 // 실적을 만든다.
 const PAST_POINTS_FETCH_CONCURRENCY = 8; // Apps Script 동시 실행 한도 안에서 안정적으로 끝나는 값(실측 기반)
 
+// getSurveyData 개별 조회 결과(좌표·유역명·조사자·조사일)를 조사지번호별로
+// localStorage에 영구 저장한다. 한 번 완료된 포인트의 이 정보는 사실상 바뀌지
+// 않으므로(재조사·정정 같은 드문 경우 제외), "완료 목록에 이미 있던 번호"는
+// 다시 조회하지 않고 이 저장분을 그대로 쓴다 — 앱을 며칠 뒤에 다시 열어도
+// 그 사이 새로 완료된 번호만 조회하면 되므로, 완료 건수가 쌓일수록 오히려
+// 매번 걸리는 시간은 짧아진다(실측: getCompletedPlots 자체는 빠르고,
+// getSurveyData 개별 조회 하나가 ~10초로 느린 게 병목이었다).
+// dashboard.html·watermap_V100.html은 같은 origin이라 localStorage를 공유하므로,
+// 필드 앱이 쓰는 survey_* 접두사와 겹치지 않는 이름을 쓴다.
+const PAST_POINTS_STORAGE_KEY = 'dashboard_past_points_cache_v1';
+
+function loadPastPointsCache() {
+  try {
+    const raw = localStorage.getItem(PAST_POINTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch (e) {
+    return {}; // 손상됐으면 빈 캐시로 취급 — 전부 새로 조회하게 될 뿐 손실은 아니다(서버가 원본)
+  }
+}
+function savePastPointsCache(cache) {
+  try { localStorage.setItem(PAST_POINTS_STORAGE_KEY, JSON.stringify(cache)); }
+  catch (e) { console.warn('지난 작업 포인트 캐시 저장 실패(용량 부족 등) — 다음에 다시 시도됨', e); }
+}
+
 async function fetchAllPastPoints(scriptUrl, onProgress) {
   let completedPlotNos = [];
   try {
@@ -1109,27 +1134,37 @@ async function fetchAllPastPoints(scriptUrl, onProgress) {
     throw new Error('지난 작업 포인트 목록을 불러오지 못했습니다: ' + err.message);
   }
 
-  let done = 0;
-  const results = await mapWithConcurrency(completedPlotNos, PAST_POINTS_FETCH_CONCURRENCY, async (pn) => {
-    const v = await fetchSurveyData(scriptUrl, pn);
-    done++;
-    if (onProgress) onProgress(done, completedPlotNos.length);
-    return v;
-  });
-  const points = [];
-  completedPlotNos.forEach((plotNo, i) => {
-    const r = results[i];
-    if (r.status !== 'fulfilled' || !r.value) return; // 조회 실패한 건은 조용히 제외 — 위치를 알 수 없다
-    const soilRow = r.value;
-    points.push({
-      plotNo,
-      x: soilRow[8], y: soilRow[9],           // I~J열 좌표
-      basin: soilRow[1],                       // B열 중유역명
-      _team: (soilRow[6] || '').toString().trim(), // G열 조사책임자(=team_code) — 실제로 조사한 조
-      isoDate: soilRow[3],                     // D열 조사일
+  const cache = loadPastPointsCache(); // { plotNo: {x,y,basin,_team,isoDate} }
+  // 이미 로컬에 있는 번호는 건너뛰고, 서버 완료 목록에 새로 나타난 번호만 조회한다.
+  const newPlotNos = completedPlotNos.filter(pn => !cache[pn]);
+
+  if (newPlotNos.length > 0) {
+    let done = 0;
+    const results = await mapWithConcurrency(newPlotNos, PAST_POINTS_FETCH_CONCURRENCY, async (pn) => {
+      const v = await fetchSurveyData(scriptUrl, pn);
+      done++;
+      if (onProgress) onProgress(done, newPlotNos.length);
+      return v;
     });
-  });
-  return points;
+    newPlotNos.forEach((plotNo, i) => {
+      const r = results[i];
+      if (r.status !== 'fulfilled' || !r.value) return; // 조회 실패한 건은 다음에 다시 시도된다(캐시에 안 남음)
+      const soilRow = r.value;
+      cache[plotNo] = {
+        x: soilRow[8], y: soilRow[9],           // I~J열 좌표
+        basin: soilRow[1],                       // B열 중유역명
+        _team: (soilRow[6] || '').toString().trim(), // G열 조사책임자(=team_code) — 실제로 조사한 조
+        isoDate: soilRow[3],                     // D열 조사일
+      };
+    });
+    savePastPointsCache(cache);
+  }
+
+  // 반환은 항상 '지금 서버 완료 목록에 있는 번호'만 기준으로 한다 — 캐시에
+  // 남아있어도 서버 목록에서 빠진 번호(드물지만)는 화면에 노출하지 않는다.
+  return completedPlotNos
+    .map(plotNo => cache[plotNo] ? Object.assign({ plotNo }, cache[plotNo]) : null)
+    .filter(Boolean);
 }
 
 async function openPastPointsMap(forceRefresh) {
