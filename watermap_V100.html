@@ -1132,6 +1132,34 @@ body.dark-mode #tab-tree table td:first-child {
     <div id="settings-saved-msg"></div>
   </div>
 
+  <!-- 미완료 작업 내보내기/가져오기 카드 (8겹 — 기기 교체·초기화 대비 탈출구) -->
+  <div class="card" style="margin-bottom:10px;">
+    <div class="card-header">
+      <span class="card-header-icon">💾</span>
+      <h2>미완료 작업 내보내기 / 가져오기</h2>
+    </div>
+    <div style="padding:12px 14px 14px;">
+      <div style="font-size:13px;color:var(--text-sub);margin-bottom:10px;">
+        기기 교체·초기화에 대비해 작성 중인 내용을 파일로 저장하거나 불러올 수 있습니다
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <button onclick="exportDrafts(false)"
+          style="flex:1;padding:11px;background:var(--green);color:white;border:none;border-radius:var(--radius-sm);font-size:14px;font-weight:700;cursor:pointer;">
+          📤 내보내기
+        </button>
+        <button onclick="exportDrafts(true)"
+          style="flex:1;padding:11px;background:var(--gray-bg);color:var(--text);border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;font-weight:700;cursor:pointer;">
+          📷 사진 포함
+        </button>
+      </div>
+      <input type="file" id="draft-import-file" accept=".json,.zip" style="display:none;" onchange="importDraftsFromFile(this.files[0])">
+      <button onclick="document.getElementById('draft-import-file').click()"
+        style="width:100%;padding:11px;background:var(--white);color:var(--text);border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;font-weight:700;cursor:pointer;">
+        📥 가져오기
+      </button>
+    </div>
+  </div>
+
   <!-- 관리자 전용 섹션 -->
   <div style="margin-bottom:14px;">
     <!-- 잠금 상태 -->
@@ -1646,6 +1674,27 @@ function json(obj) {
       style="width:100%;padding:15px;background:var(--gray-bg);color:var(--text-sub);border:none;border-radius:var(--radius-sm);font-size:17px;font-weight:600;cursor:pointer;">
       취소
     </button>
+  </div>
+</div>
+
+<!-- 미완료 작업 가져오기 검토 오버레이(8겹 E-2) — 자동 덮어쓰기 금지, 무엇이 들어오는지 먼저 보여준다 -->
+<div id="import-review-overlay" style="display:none;position:fixed;inset:0;z-index:9999;">
+  <div onclick="closeImportReview()" style="position:absolute;inset:0;background:rgba(0,0,0,0.5);"></div>
+  <div style="position:absolute;top:6%;left:4%;right:4%;bottom:6%;background:var(--white);border-radius:16px;padding:16px;display:flex;flex-direction:column;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">가져오기 검토 (<span id="import-review-count">0</span>건)</div>
+    <div id="import-review-team-warn" style="display:none;font-size:12px;color:var(--danger);font-weight:700;margin-bottom:8px;"></div>
+    <div style="font-size:12px;color:var(--text-sub);margin-bottom:10px;">가져올 항목을 선택하세요. 이미 있는 항목은 기본적으로 선택되어 있지 않습니다.</div>
+    <div id="import-review-body" style="flex:1;overflow-y:auto;"></div>
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button onclick="closeImportReview()"
+        style="flex:1;padding:13px;background:var(--gray-bg);color:var(--text-sub);border:none;border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;">
+        취소
+      </button>
+      <button onclick="applyImportSelection()"
+        style="flex:2;padding:13px;background:var(--green);color:white;border:none;border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;">
+        선택한 항목 가져오기
+      </button>
+    </div>
   </div>
 </div>
 
@@ -6446,6 +6495,288 @@ async function fetchFromSheet() {
     statusEl.style.color = 'var(--danger)';
     statusEl.textContent = '❌ 불러오기 실패 — 네트워크 연결을 확인해주세요';
   }
+}
+
+// ====== 8겹: 미완료 작업 내보내기 / 가져오기 ======
+// 1~7겹은 전부 앱 안에서 자동으로 도는 장치지만, 이 겹만 사용자가 손으로 실행하고
+// 데이터가 앱 밖으로 나간다 — 그래서 "조용히 하지 않는다"가 설계 원칙이다.
+// 내보낼 때도 가져올 때도 무엇이 오가는지 먼저 보여준다.
+const DRAFT_EXPORT_FORMAT = 'watermap-draft-export';
+const DRAFT_EXPORT_VERSION = 1;
+
+function fmtDateForFilename(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes());
+}
+
+function downloadTextFile(text, filename, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// 내보낼 draft 목록을 모은다. 유예 보관본(survey_trashed_draft_*)은 제외한다
+// — 이미 "버려진" 데이터라 내보낼 가치가 낮다(2겹-B가 보관본을 미러하지 않는 것과 같은 이유).
+function collectExportableDrafts() {
+  const out = {};
+  Object.keys(localStorage).forEach(key => {
+    if (!key.startsWith(DRAFT_KEY_PREFIX)) return;
+    const plotNo = key.slice(DRAFT_KEY_PREFIX.length);
+    let draft = null;
+    try { draft = JSON.parse(localStorage.getItem(key)); } catch (e) { draft = null; }
+    if (!draft) return;
+    out[plotNo] = draft;
+  });
+  return out;
+}
+
+async function exportDrafts(withPhotos) {
+  // 사진 포함 경로만 JSZip에 의존한다 — 텍스트만 내보내기는 이 가드를 타지 않아
+  // 비행기 모드에서도 동작한다(8겹이 "탈출구"인데 탈출구가 CDN에 의존하면 모순이다).
+  if (withPhotos && typeof JSZip === 'undefined') {
+    showToast('사진 포함 내보내기는 온라인 상태에서만 가능합니다', 'error');
+    return;
+  }
+
+  const drafts = collectExportableDrafts();
+  const plotNos = Object.keys(drafts);
+  if (plotNos.length === 0) {
+    showToast('내보낼 작성 중인 내용이 없습니다', 'error');
+    return;
+  }
+
+  const payload = {
+    format: DRAFT_EXPORT_FORMAT,
+    version: DRAFT_EXPORT_VERSION,
+    exportedAt: Date.now(),
+    sourceTeam: localStorage.getItem('team_code') || '',
+    drafts,
+  };
+  const jsonText = JSON.stringify(payload);
+  const noNameCount = plotNos.filter(p => p === '_default').length;
+  const namedCount = plotNos.length - noNameCount;
+  const sizeKB = Math.max(1, Math.round(new Blob([jsonText]).size / 1024));
+
+  // 내보내기 전에 무엇이 나가는지 요약을 보여준다 — 모른 채 파일을 만들지 않게 한다.
+  const summaryMsg = '작성 중 ' + plotNos.length + '건'
+    + (noNameCount > 0 ? '(번호없음 ' + noNameCount + '건 포함)' : '')
+    + '을 내보냅니다.\n'
+    + '사진 포함: ' + (withPhotos ? '예' : '아니오') + '\n'
+    + '예상 크기: 약 ' + sizeKB + 'KB' + (withPhotos ? ' + 사진' : '') + '\n\n'
+    + '계속하시겠습니까?';
+  if (!confirm(summaryMsg)) return;
+
+  try {
+    if (!withPhotos) {
+      downloadTextFile(jsonText, 'watermap_drafts_' + fmtDateForFilename(payload.exportedAt) + '.json', 'application/json');
+      showToast('내보내기 완료 (' + plotNos.length + '건)', 'success');
+      return;
+    }
+
+    const zip = new JSZip();
+    zip.file('drafts.json', jsonText);
+    let photoCount = 0;
+    for (const plotNo of plotNos) {
+      const draft = drafts[plotNo];
+      const photoRefs = [
+        ...(draft._photoKeys || []).map(pk => ({ k: pk.k, filename: pk.filename, isMove: false })),
+        ...(draft._movePhotoKeys || []).map(pk => ({ k: pk.k, filename: pk.filename, isMove: true })),
+      ];
+      for (const ref of photoRefs) {
+        const idbKey = ref.isMove ? idbMoveOrigKey(plotNo, ref.k) : idbOrigKey(plotNo, ref.k);
+        const stored = await idbGet(idbKey);
+        if (stored && stored.base64) {
+          zip.file('photos/' + plotNo + '/' + ref.filename, stored.base64, { base64: true });
+          photoCount++;
+        }
+      }
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'watermap_drafts_' + fmtDateForFilename(payload.exportedAt) + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('내보내기 완료 (' + plotNos.length + '건, 사진 ' + photoCount + '장)', 'success');
+  } catch (e) {
+    console.warn('내보내기 실패', e);
+    showToast('내보내기에 실패했습니다', 'error');
+  }
+}
+
+// 가져오기 검토 화면에서 사용자가 선택한 항목을 확정할 때까지 들고 있는 상태.
+let _pendingImport = null;
+
+async function importDraftsFromFile(file) {
+  const input = document.getElementById('draft-import-file');
+  if (!file) return;
+  try {
+    let payload = null;
+    let photoZip = null;
+    const isZip = /\.zip$/i.test(file.name);
+    if (isZip) {
+      if (typeof JSZip === 'undefined') {
+        showToast('zip 파일을 가져오려면 온라인 상태여야 합니다', 'error');
+        return;
+      }
+      const zip = await JSZip.loadAsync(file);
+      const entry = zip.file('drafts.json');
+      if (!entry) { showToast('이 앱에서 내보낸 파일이 아닙니다', 'error'); return; }
+      payload = JSON.parse(await entry.async('text'));
+      photoZip = zip;
+    } else {
+      payload = JSON.parse(await file.text());
+    }
+
+    // format/version이 맞지 않으면 아무것도 하지 않는다 — 3겹의 원칙과 같다.
+    if (!payload || payload.format !== DRAFT_EXPORT_FORMAT || payload.version !== DRAFT_EXPORT_VERSION) {
+      showToast('이 앱에서 내보낸 파일이 아닙니다', 'error');
+      return;
+    }
+    if (!payload.drafts || typeof payload.drafts !== 'object' || Object.keys(payload.drafts).length === 0) {
+      showToast('가져올 내용이 없는 파일입니다', 'error');
+      return;
+    }
+    renderImportReview(payload, photoZip);
+  } catch (e) {
+    console.warn('가져오기 파일 처리 실패', e);
+    showToast('파일을 읽을 수 없습니다', 'error');
+  } finally {
+    if (input) input.value = ''; // 같은 파일을 다시 선택해도 change가 다시 발화하도록
+  }
+}
+
+// 적용 전에 목록을 보여준다 — 3겹의 원칙(자동 덮어쓰기 금지)을 가져오기에도 적용한다.
+function renderImportReview(payload, photoZip) {
+  const records = getSurveyRecords().filter(r => r && typeof r === 'object' && !Array.isArray(r));
+  const recordPlotNos = new Set(records.map(r => r.plotNo));
+
+  const entries = Object.keys(payload.drafts).map(originalPlotNo => {
+    const draft = payload.drafts[originalPlotNo];
+    // _default는 실제 survey_draft__default를 절대 건드리지 않는다 — 그 슬롯은 유예
+    // 보관도 거치지 않고 1겹 목록에도 뜨지 않아(§7) 되돌릴 방법이 전혀 없기 때문이다.
+    // 조건부로 막는 대신 항상 별도의 보이는 키로 들여온다(같은 파일을 다시 가져오면
+    // 같은 키를 다시 쓰므로 '덮어씀'으로 정상 처리된다).
+    const targetPlotNo = originalPlotNo === '_default'
+      ? '_imported_' + payload.exportedAt
+      : originalPlotNo;
+    const hasLocalDraft = localStorage.getItem(DRAFT_KEY_PREFIX + targetPlotNo) !== null;
+    const hasRecord = recordPlotNos.has(targetPlotNo);
+    const status = hasLocalDraft ? 'overwrite' : (hasRecord ? 'record' : 'new');
+    return {
+      originalPlotNo, targetPlotNo, draft, status,
+      score: draftContentScore(draft),
+      checked: status === 'new', // '새 항목'만 기본 체크 — 덮어쓰는 항목은 직접 켜야 한다
+    };
+  });
+
+  _pendingImport = { payload, photoZip, entries };
+
+  const teamMismatch = payload.sourceTeam && payload.sourceTeam !== (localStorage.getItem('team_code') || '');
+  const warnEl = document.getElementById('import-review-team-warn');
+  warnEl.style.display = teamMismatch ? 'block' : 'none';
+  if (teamMismatch) {
+    warnEl.textContent = '⚠️ 다른 조 파일입니다(' + escapeHtml(payload.sourceTeam) + '). 남의 조사 내용이 섞일 수 있습니다.';
+  }
+
+  const body = document.getElementById('import-review-body');
+  body.innerHTML = entries.map((e, i) => {
+    const label = e.originalPlotNo === '_default' ? '번호없음 (가져온 사본)' : e.originalPlotNo;
+    const statusLabel = e.status === 'overwrite' ? '⚠️ 덮어씀'
+      : (e.status === 'record' ? '📌 레코드 있음 — 선택지가 뜹니다' : '🆕 새 항목');
+    return `
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--gray-border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
+        <input type="checkbox" data-idx="${i}" ${e.checked ? 'checked' : ''} style="margin-top:2px;width:18px;height:18px;flex-shrink:0;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:14px;">${escapeHtml(label)}
+            <span style="font-weight:400;font-size:12px;color:var(--text-sub);">${statusLabel}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text-sub);margin-top:2px;">항목 ${e.score}개 · ${escapeHtml(fmtTime(e.draft._savedAt))} 작성</div>
+        </div>
+      </label>`;
+  }).join('');
+
+  body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      _pendingImport.entries[Number(cb.dataset.idx)].checked = cb.checked;
+    });
+  });
+
+  document.getElementById('import-review-count').textContent = entries.length;
+  document.getElementById('import-review-overlay').style.display = 'block';
+}
+
+function closeImportReview() {
+  document.getElementById('import-review-overlay').style.display = 'none';
+  _pendingImport = null;
+}
+
+async function applyImportSelection() {
+  if (!_pendingImport) return;
+  const { photoZip } = _pendingImport;
+  const selected = _pendingImport.entries.filter(e => e.checked);
+  if (selected.length === 0) { closeImportReview(); return; }
+
+  let photoRestored = 0, photoMissing = 0;
+  for (const e of selected) {
+    const draftCopy = Object.assign({}, e.draft);
+    // _savedAt을 '가져온 시각'으로 갱신한다. 내보낸 기기의 시계값을 그대로 쓰면
+    // 새 기기의 레코드보다 오래된 것으로 취급돼 5겹·1겹 어디에도 나타나지 않을 수 있다
+    // (기기 교체가 이 기능의 주 용도인데 가져온 내용을 볼 방법이 없어지는 셈이다).
+    draftCopy._importedSavedAt = draftCopy._savedAt || null;
+    draftCopy._savedAt = Date.now();
+    // _firstEditedAt은 원본을 그대로 둔다 — 6겹의 "시작 → 작성 중" 표시를 보존한다.
+
+    const lsKey = DRAFT_KEY_PREFIX + e.targetPlotNo;
+    const body = JSON.stringify(draftCopy);
+    try {
+      localStorage.setItem(lsKey, body);
+      mirrorDraftToIDB(lsKey, body); // 미러를 빠뜨리면 다음 실행의 병합이 한쪽만 보게 된다
+    } catch (err) {
+      console.warn('가져오기 저장 실패', e.targetPlotNo, err);
+      continue;
+    }
+
+    if (!photoZip) continue;
+    const photoRefs = [
+      ...(draftCopy._photoKeys || []).map(pk => ({ k: pk.k, filename: pk.filename, isMove: false })),
+      ...(draftCopy._movePhotoKeys || []).map(pk => ({ k: pk.k, filename: pk.filename, isMove: true })),
+    ];
+    for (const ref of photoRefs) {
+      // 슬롯 판정은 draft 배열(어느 목록에서 나왔는지)이 1차 기준이다. resolvePhotoSlot()은
+      // 파일명(내보낼 때의 originalPlotNo 기준)과 대조하는 데만 쓴다 — 둘이 어긋나거나
+      // 슬롯을 식별 못 하면 그 장은 건너뛰고 건수에 집계한다(조용한 누락 금지).
+      const zipPath = 'photos/' + e.originalPlotNo + '/' + ref.filename;
+      const zEntry = photoZip.file(zipPath);
+      if (!zEntry) { photoMissing++; continue; }
+      const check = resolvePhotoSlot(e.originalPlotNo, ref.filename);
+      if (check && check.isMove !== ref.isMove) { photoMissing++; continue; }
+      try {
+        const base64 = await zEntry.async('base64');
+        // 저장 대상 키는 targetPlotNo 기준이다(_default → _imported_* 리매핑 반영).
+        const idbKey = ref.isMove ? idbMoveOrigKey(e.targetPlotNo, ref.k) : idbOrigKey(e.targetPlotNo, ref.k);
+        // captureId는 새로 만든다 — draft 본문·내보내기 스키마 어디에도 원본 captureId가
+        // 없다. 새로 만들어도 무해한 이유: captureId는 보조 캐시 폴백 신뢰 여부 판정에만
+        // 쓰이는데, 가져오기는 원본 키에 쓰므로 복원·유실 집계가 그 판정 경로를 안 탄다.
+        await idbSet(idbKey, { base64, filename: ref.filename, captureId: 'imported_' + Date.now() + '_' + ref.k });
+        photoRestored++;
+      } catch (err) { photoMissing++; }
+    }
+  }
+
+  closeImportReview();
+  renderDraftList();
+  let msg = '가져오기 완료 (' + selected.length + '건)';
+  if (photoZip) msg += ' · 사진 ' + photoRestored + '장 복원';
+  if (photoMissing > 0) msg += ' · ' + photoMissing + '장 복원 실패';
+  showToast(msg, photoMissing > 0 ? 'error' : 'success');
 }
 
 // loadRecord의 복원 로직만 분리 (탭이동/토스트 없이)
