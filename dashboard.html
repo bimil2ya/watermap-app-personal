@@ -1069,6 +1069,26 @@ function buildPastInfoContent(plot, pos, completionDateLabel) {
 // null이면 "아직 한 번도 안 받아왔음"이라는 뜻이라, 이 경우에만 실제로 조회한다.
 let _allPastPoints = null; // [{ plotNo, x, y, basin, _team, isoDate }] | null
 
+// 배열 전체에 비동기 작업을 걸되, 한 번에 최대 `limit`개만 동시에 실행한다.
+// Apps Script 웹앱은 같은 스크립트에 대한 동시 실행 한도가 있어서, 완료
+// 포인트 수백 건을 Promise.allSettled로 한꺼번에 전부 쏘면(실측: 200여 건)
+// 일부만 성공하거나(예: 56건) 아예 전부 막혀 45초 넘게 응답이 없는 상태까지
+// 재현됐다 — 지난 작업 포인트 보기가 실사용 중 0건으로 보였던 실제 원인이다.
+// 조금씩 나눠서 순차적으로 보내면 한도 안에서 안정적으로 끝난다.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      try { results[i] = { status: 'fulfilled', value: await fn(items[i], i) }; }
+      catch (err) { results[i] = { status: 'rejected', reason: err }; }
+    }
+  }
+  await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(worker));
+  return results;
+}
+
 // "지난 작업 포인트 보기"는 팀별 현황(getPlots, 현재 배정 표준지 목록)과 다른
 // 데이터 소스를 쓴다. getPlots는 관리자가 새 작업 기간을 배정할 때마다 그 기간
 // 것으로 교체되는 "현재 배정 현황"이라, 배정이 아직 안 된 기간에는 지난 실적까지
@@ -1076,7 +1096,9 @@ let _allPastPoints = null; // [{ plotNo, x, y, basin, _team, isoDate }] | null
 // 영구히 남으므로, 그 시트를 그대로 읽는 getCompletedPlots(조사지번호 전체) +
 // getSurveyData(번호별 좌표·조사자·조사일)를 조합해 배정 주기와 무관한 누적
 // 실적을 만든다.
-async function fetchAllPastPoints(scriptUrl) {
+const PAST_POINTS_FETCH_CONCURRENCY = 8; // Apps Script 동시 실행 한도 안에서 안정적으로 끝나는 값(실측 기반)
+
+async function fetchAllPastPoints(scriptUrl, onProgress) {
   let completedPlotNos = [];
   try {
     const data = await fetchJson(scriptUrl + '?action=getCompletedPlots');
@@ -1087,7 +1109,13 @@ async function fetchAllPastPoints(scriptUrl) {
     throw new Error('지난 작업 포인트 목록을 불러오지 못했습니다: ' + err.message);
   }
 
-  const results = await Promise.allSettled(completedPlotNos.map(pn => fetchSurveyData(scriptUrl, pn)));
+  let done = 0;
+  const results = await mapWithConcurrency(completedPlotNos, PAST_POINTS_FETCH_CONCURRENCY, async (pn) => {
+    const v = await fetchSurveyData(scriptUrl, pn);
+    done++;
+    if (onProgress) onProgress(done, completedPlotNos.length);
+    return v;
+  });
   const points = [];
   completedPlotNos.forEach((plotNo, i) => {
     const r = results[i];
@@ -1117,8 +1145,15 @@ async function openPastPointsMap(forceRefresh) {
   }
 
   if (forceRefresh || _allPastPoints === null) {
+    const loadingNoteEl = document.getElementById('past-map-loading-note');
+    loadingNoteEl.textContent = '지난 작업 포인트 목록을 불러오는 중...';
     try {
-      _allPastPoints = await fetchAllPastPoints(getScriptUrl());
+      // 조회 건수가 많으면(수백 건) 나눠서 보내느라 몇~수십 초 걸릴 수 있다 —
+      // 진행 상황을 숫자로 보여줘서 멈춘 것처럼 보이지 않게 한다.
+      _allPastPoints = await fetchAllPastPoints(getScriptUrl(), (done, total) => {
+        if (myToken !== pastMapState.loadToken) return;
+        loadingNoteEl.textContent = `지난 작업 포인트 조회 중... (${done}/${total})`;
+      });
     } catch (err) {
       if (myToken !== pastMapState.loadToken) return;
       document.getElementById('past-map-loading-note').hidden = true;
