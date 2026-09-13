@@ -112,8 +112,16 @@ body {
 .team-week-row { display: flex; justify-content: space-between; padding: 2px 0 2px 14px; font-size: 12px; color: var(--text-sub); gap: 8px; }
 .team-week-cum { color: var(--gray-text); }
 
+/* ===== 탭 전환 ===== */
+.dash-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.dash-tab-btn {
+  flex: 1; padding: 11px; border-radius: var(--radius-sm); border: 1.5px solid var(--gray-border);
+  background: var(--white); color: var(--text-sub); font-size: 14.5px; font-weight: 700; cursor: pointer;
+}
+.dash-tab-btn.active { background: var(--green-dark); color: var(--white); border-color: var(--green-dark); }
+
 /* ===== 지도 영역 ===== */
-#map { width: 100%; height: 50vh; min-height: 320px; background: var(--gray-bg); }
+#map, #past-map { width: 100%; height: 50vh; min-height: 320px; background: var(--gray-bg); }
 .map-legend {
   display: flex; gap: 16px; padding: 10px 16px; font-size: 13px; color: var(--text-sub);
   background: #F8F8F6; border-top: 1.5px solid var(--gray-border);
@@ -195,44 +203,74 @@ body {
     <div id="loading-note" class="loading-note">불러오는 중...</div>
     <div id="error-note" class="error-note" hidden></div>
 
-    <!-- ===== 전체 현황 ===== -->
-    <div class="card" id="overview-card" hidden>
-      <div class="card-header">전체 현황</div>
-      <div class="card-body">
-        <div class="stat-grid">
-          <div class="stat-box"><div class="num" id="stat-total">-</div><div class="label">전체 포인트</div></div>
-          <div class="stat-box"><div class="num" id="stat-done">-</div><div class="label">완료</div></div>
-          <div class="stat-box"><div class="num pending" id="stat-pending">-</div><div class="label">미완료</div></div>
+    <!-- ===== 탭 전환 (전체 팀 데이터가 로드된 뒤에만 표시) ===== -->
+    <div class="dash-tabs" id="dash-tabs" hidden>
+      <button class="dash-tab-btn active" id="tab-btn-team" onclick="switchDashTab('team')">👥 팀별 현황</button>
+      <button class="dash-tab-btn" id="tab-btn-past" onclick="switchDashTab('past')">🗺️ 지난 작업 포인트 보기</button>
+    </div>
+
+    <div id="team-view">
+
+      <!-- ===== 전체 현황 ===== -->
+      <div class="card" id="overview-card" hidden>
+        <div class="card-header">전체 현황</div>
+        <div class="card-body">
+          <div class="stat-grid">
+            <div class="stat-box"><div class="num" id="stat-total">-</div><div class="label">전체 포인트</div></div>
+            <div class="stat-box"><div class="num" id="stat-done">-</div><div class="label">완료</div></div>
+            <div class="stat-box"><div class="num pending" id="stat-pending">-</div><div class="label">미완료</div></div>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="overall-progress" style="width:0%"></div></div>
         </div>
-        <div class="progress-track"><div class="progress-fill" id="overall-progress" style="width:0%"></div></div>
       </div>
-    </div>
 
-    <!-- ===== 팀 목록 ===== -->
-    <div class="card" id="team-list-card" hidden>
-      <div class="card-header">팀 선택 — 지도에서 위치 보기</div>
-      <div class="card-body" id="team-list-body"></div>
-    </div>
+      <!-- ===== 팀 목록 ===== -->
+      <div class="card" id="team-list-card" hidden>
+        <div class="card-header">팀 선택 — 지도에서 위치 보기</div>
+        <div class="card-body" id="team-list-body"></div>
+      </div>
 
-    <!-- ===== 지도(팀 선택 시) ===== -->
-    <div class="card" id="map-card" hidden>
-      <div class="card-header" style="flex-wrap:wrap;">
-        <button class="back-btn" onclick="closeMap()">← 팀 목록으로</button>
-        <span id="map-team-title" style="font-weight:800;"></span>
+      <!-- ===== 지도(팀 선택 시) ===== -->
+      <div class="card" id="map-card" hidden>
+        <div class="card-header" style="flex-wrap:wrap;">
+          <button class="back-btn" onclick="closeMap()">← 팀 목록으로</button>
+          <span id="map-team-title" style="font-weight:800;"></span>
+        </div>
+        <div id="date-filter-row" style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);" hidden>
+          <select id="date-filter" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
+            <option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>
+          </select>
+        </div>
+        <div id="map-loading-note" class="loading-note" style="padding:14px 20px;font-size:13px;" hidden>완료일 확인 중...</div>
+        <div id="map"></div>
+        <div class="map-legend">
+          <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
+          <span><span class="legend-dot" style="background:#C0392B;"></span>미완료</span>
+        </div>
+        <div class="no-coord-note" id="no-coord-note" hidden></div>
       </div>
-      <div id="date-filter-row" style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);" hidden>
-        <select id="date-filter" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
-          <option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>
-        </select>
+
+    </div><!-- /team-view -->
+
+    <!-- ===== 지난 작업 포인트 보기 (전체 팀의 완료 포인트를 한 지도에) ===== -->
+    <div id="past-view" hidden>
+      <div class="card" id="past-map-card">
+        <div class="card-header">
+          <span>지난 작업 포인트 <span id="past-count-label" style="font-weight:500;color:var(--text-sub);"></span></span>
+        </div>
+        <div id="past-date-filter-row" style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);" hidden>
+          <select id="past-date-filter" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
+            <option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>
+          </select>
+        </div>
+        <div id="past-map-loading-note" class="loading-note" style="padding:14px 20px;font-size:13px;" hidden>완료일 확인 중...</div>
+        <div id="past-map"></div>
+        <div class="map-legend">
+          <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
+        </div>
+        <div class="no-coord-note" id="past-no-coord-note" hidden></div>
       </div>
-      <div id="map-loading-note" class="loading-note" style="padding:14px 20px;font-size:13px;" hidden>완료일 확인 중...</div>
-      <div id="map"></div>
-      <div class="map-legend">
-        <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
-        <span><span class="legend-dot" style="background:#C0392B;"></span>미완료</span>
-      </div>
-      <div class="no-coord-note" id="no-coord-note" hidden></div>
-    </div>
+    </div><!-- /past-view -->
 
   </div>
 </div>
@@ -591,6 +629,7 @@ function renderOverview(teamsData) {
   document.getElementById('topbar-sub').textContent =
     total > 0 ? `전체 ${total}건 중 ${done}건 완료(${pct}%)` : '조원별 작업포인트 진행 상황';
   document.getElementById('overview-card').hidden = false;
+  document.getElementById('dash-tabs').hidden = false; // 팀 데이터가 준비된 뒤에만 탭을 보여준다
 }
 
 // 유역명·주차별 집계 — watermap_V100.html의 loadTeamSummary()와 동일한 규칙
@@ -964,6 +1003,195 @@ function getDotMarkerImage(done) {
 function closeMap() {
   document.getElementById('map-card').hidden = true;
   document.getElementById('team-list-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ============================================================
+// 지난 작업 포인트 보기 — 전체 팀의 완료 포인트를 한 지도에 모아 보여준다.
+// allTeamsData는 loadAll()이 이미 모든 팀에 대해 가져와 둔 것이라, 이 탭은
+// 추가 서버 호출 없이(완료일만 예외 — 아래 참고) 필터링만으로 동작한다.
+// 지도 상태(mapState)는 팀별 지도 전용이라 그대로 재사용하지 않고 별도로
+// 둔다 — 두 지도가 하나의 상태를 공유하면 탭을 오갈 때 오래된 loadToken이
+// 서로의 렌더링을 취소시키는 경합이 생기기 쉽다(mapState 통합 전 실제로
+// 겪었던 종류의 버그, 주석 475행 참고).
+// ============================================================
+const pastMapState = { map: null, markers: [], infoWindows: [], dateLabels: [], loadToken: 0 };
+
+function switchDashTab(tab) {
+  const isTeam = tab === 'team';
+  document.getElementById('team-view').hidden = !isTeam;
+  document.getElementById('past-view').hidden = isTeam;
+  document.getElementById('tab-btn-team').classList.toggle('active', isTeam);
+  document.getElementById('tab-btn-past').classList.toggle('active', !isTeam);
+  if (!isTeam) openPastPointsMap();
+}
+
+function closeAllPastInfoWindows() {
+  pastMapState.infoWindows.forEach(info => info.close());
+  pastMapState.infoWindows = [];
+  pastMapState.dateLabels.forEach(overlay => overlay.setMap(null));
+  pastMapState.dateLabels = [];
+  pastMapState.markers.forEach(m => m.setOpacity(1));
+}
+
+function buildPastInfoContent(plot, pos, completionDateLabel) {
+  const kakaoMapUrl = 'https://map.kakao.com/link/map/'
+    + encodeURIComponent(plot.plotNo || '조사지') + ',' + pos.lat + ',' + pos.lng;
+  return `<div style="padding:6px 10px;font-size:13px;white-space:nowrap;">
+    <b>${escapeHtml(plot.plotNo || '')}</b>
+    ${plot.basin ? ' · ' + escapeHtml(plot.basin) : ''}
+    <br>✅ ${escapeHtml(plot._team)}${completionDateLabel ? ' · ' + escapeHtml(completionDateLabel) : ''}
+    <br><a href="${kakaoMapUrl}" target="_blank" rel="noopener" style="color:#1D9E75;font-weight:700;">📍 카카오맵 앱에서 보기</a>
+  </div>`;
+}
+
+// openMap()과 구조가 대부분 같다(로딩 토큰으로 겹친 호출 무시, 마커 먼저 그리고
+// 완료일은 나중에 채우기, 날짜별 그룹 드롭다운) — 다른 점은 팀 하나가 아니라
+// 전체 팀의 "완료" 포인트만 모은다는 것과, 마커가 전부 완료(초록)라는 것뿐이다.
+async function openPastPointsMap() {
+  const myToken = ++pastMapState.loadToken;
+  document.getElementById('past-map-loading-note').hidden = true;
+
+  const key = getKakaoKey();
+  if (!key) {
+    document.getElementById('key-setup').hidden = false;
+    document.getElementById('key-setup').scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+
+  const pastPoints = [];
+  allTeamsData.forEach(({ team, plots }) => {
+    plots.forEach(p => { if (isDone(p)) pastPoints.push({ ...p, _team: team }); });
+  });
+  document.getElementById('past-count-label').textContent = '(완료 ' + pastPoints.length + '건)';
+
+  try {
+    await loadKakaoSdk(key);
+  } catch (err) {
+    if (myToken !== pastMapState.loadToken) return;
+    document.getElementById('error-note').textContent = err.message;
+    document.getElementById('error-note').hidden = false;
+    return;
+  }
+  if (myToken !== pastMapState.loadToken) return;
+
+  const located = [];
+  let noCoordCount = 0;
+  pastPoints.forEach(p => {
+    const pos = resolveLatLng(p.x, p.y);
+    if (pos) located.push({ plot: p, pos });
+    else noCoordCount++;
+  });
+
+  const noCoordNote = document.getElementById('past-no-coord-note');
+  if (noCoordCount > 0) {
+    noCoordNote.textContent = `📍 위치 정보가 없는 완료 포인트 ${noCoordCount}건은 지도에 표시되지 않습니다.`;
+    noCoordNote.hidden = false;
+  } else {
+    noCoordNote.hidden = true;
+  }
+
+  const mapEl = document.getElementById('past-map');
+  const dateFilterRow = document.getElementById('past-date-filter-row');
+  const mapLoadingNote = document.getElementById('past-map-loading-note');
+  const pastDateFilterSelect = document.getElementById('past-date-filter');
+  if (pastMapState.markers.length) {
+    pastMapState.markers.forEach(m => m.setMap(null));
+    pastMapState.markers = [];
+  }
+  closeAllPastInfoWindows();
+  pastDateFilterSelect.value = '';
+  dateFilterRow.hidden = true;
+
+  if (located.length === 0) {
+    pastMapState.map = null;
+    mapEl.innerHTML = '<div class="loading-note">아직 완료된 포인트가 없습니다.</div>';
+    return;
+  }
+
+  const center = new kakao.maps.LatLng(located[0].pos.lat, located[0].pos.lng);
+  const isNewMap = !pastMapState.map;
+  if (pastMapState.map) {
+    pastMapState.map.setCenter(center);
+  } else {
+    mapEl.innerHTML = '';
+    pastMapState.map = new kakao.maps.Map(mapEl, { center, level: 9 });
+  }
+  if (isNewMap) {
+    kakao.maps.event.addListener(pastMapState.map, 'click', () => {
+      closeAllPastInfoWindows();
+      pastDateFilterSelect.value = '';
+    });
+  }
+
+  const bounds = new kakao.maps.LatLngBounds();
+  const markerEntries = [];
+  located.forEach(({ plot, pos }) => {
+    const position = new kakao.maps.LatLng(pos.lat, pos.lng);
+    bounds.extend(position);
+    const marker = new kakao.maps.Marker({ position, map: pastMapState.map, image: getDotMarkerImage(true) });
+    const info = new kakao.maps.InfoWindow({ content: buildPastInfoContent(plot, pos, null) });
+    kakao.maps.event.addListener(marker, 'click', () => {
+      closeAllPastInfoWindows();
+      pastDateFilterSelect.value = '';
+      info.open(pastMapState.map, marker);
+      pastMapState.infoWindows = [info];
+    });
+    pastMapState.markers.push(marker);
+    markerEntries.push({ plot, pos, marker, info });
+  });
+  pastMapState.map.setBounds(bounds);
+
+  // 완료일은 getPlots에 없고 조사지번호별 개별 조회(getSurveyData)로만 얻을 수
+  // 있다 — 팀별 지도(openMap)와 같은 fetchCompletionDate()·5분 캐시를 그대로
+  // 재사용하므로, 이미 어떤 팀의 지도를 열어본 적이 있다면 그만큼은 캐시로
+  // 즉시 채워진다. 마커는 이 조회를 기다리지 않고 이미 다 그려진 상태다.
+  mapLoadingNote.hidden = false;
+  const scriptUrl = getScriptUrl();
+  const dateResults = await Promise.allSettled(
+    markerEntries.map(e => fetchCompletionDate(scriptUrl, e.plot.plotNo))
+  );
+  if (myToken !== pastMapState.loadToken) return;
+  mapLoadingNote.hidden = true;
+
+  const groupsByDate = {};
+  markerEntries.forEach((entry, i) => {
+    const r = dateResults[i];
+    if (r.status !== 'fulfilled' || !r.value) return;
+    const { label, isoDate } = r.value;
+    entry.info.setContent(buildPastInfoContent(entry.plot, entry.pos, label));
+    if (!groupsByDate[label]) groupsByDate[label] = { isoDate, items: [] };
+    groupsByDate[label].items.push(entry);
+  });
+
+  const sortedLabels = Object.keys(groupsByDate).sort(
+    (a, b) => new Date(groupsByDate[a].isoDate) - new Date(groupsByDate[b].isoDate)
+  );
+  if (sortedLabels.length > 0) {
+    pastDateFilterSelect.innerHTML = '<option value="">날짜 선택 — 같은 날 완료한 포인트 모아보기</option>'
+      + sortedLabels.map(label =>
+          `<option value="${escapeHtml(label)}">${escapeHtml(label)} · ${groupsByDate[label].items.length}건</option>`
+        ).join('');
+    dateFilterRow.hidden = false;
+  } else {
+    dateFilterRow.hidden = true;
+  }
+
+  pastDateFilterSelect.onchange = (e) => {
+    const dateLabel = e.target.value;
+    closeAllPastInfoWindows();
+    if (!dateLabel) return;
+    const selectedItems = groupsByDate[dateLabel]?.items || [];
+    const selectedMarkers = new Set(selectedItems.map(({ marker }) => marker));
+    pastMapState.markers.forEach(m => { if (!selectedMarkers.has(m)) m.setOpacity(0.15); });
+    selectedItems.forEach(({ marker }) => {
+      const overlay = new kakao.maps.CustomOverlay({
+        position: marker.getPosition(), yAnchor: 1.6,
+        content: `<div style="background:#0A5C45;color:#fff;font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.35);">${escapeHtml(dateLabel)}</div>`,
+      });
+      overlay.setMap(pastMapState.map);
+      pastMapState.dateLabels.push(overlay);
+    });
+  };
 }
 
 function initDashboard() {
