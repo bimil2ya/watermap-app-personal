@@ -86,3 +86,41 @@ Script/Sheet/Drive)에는 절대 테스트 데이터를 보내지 않는다.
 - [ ] `localStorage.setItem('survey_records', '손상된 값')` 상태에서
       `renderRecordsList()` 등을 호출해도 예외 없이 빈 목록으로 동작하고,
       원본 문자열은 지워지지 않는다(복구 가능성 유지).
+
+## 10. 미완료 작업(draft) 안전장치 — 1~8겹
+
+상세 설계·전체 검증 항목은 `미완료작업_안전장치_개발지시서.md` §4·§6 참고. 여기는
+관련 함수를 건드릴 때 최소로 재확인할 핵심만 추린 것이다.
+
+**5겹 — 레코드↔draft 우선순위 (`onPlotSelect`, `trashDraft`, `chooseDraftSource`)**
+- [ ] 정식 레코드보다 최신인 draft가 있는 포인트를 열면 `confirm()` 선택지가 뜨고,
+      "작성 중이던 것"을 골라도 **조사일은 레코드 값을 유지**한다(hidden·화면 표시 둘 다).
+- [ ] "저장된 내용"을 고르면 탈락한 draft가 `survey_trashed_draft_<번호>`에 **정확히**
+      보관되고(값으로 확인), 그 상태로 다른 포인트로 이동해도 메아리(레코드 내용이
+      draft로 재저장되는 것)가 생기지 않는다.
+- [ ] `_recordEchoGuard`가 걸린 상태에서 빠른선택 버튼·숫자 선택 시트로 값을 바꾸면
+      (합성 `change` 이벤트) 1초 뒤 정상적으로 draft가 저장된다 — `isTrusted` 체크가
+      아니라 필드 범위(`#tab-soil`/`#tab-tree`)로 판정하므로 막히면 안 된다.
+
+**2겹-B — IndexedDB 미러 (`mirrorDraftToIDB`, `tombstoneDraftInIDB`, `mergeDraftMirrors`)**
+- [ ] `saveDraft()` 후 `localStorage.getItem('survey_draft_<번호>')`와
+      `await idbGet('draft_<번호>')`가 **완전히 동일**하다.
+- [ ] `clearDraft()` / 1겹 목록의 "작성 취소" / `trashDraft()` 세 삭제 경로 모두
+      미러가 `idbDelete`가 아니라 **묘비(`{_deletedAt}`)**로 바뀐다 — 지운 뒤
+      `await mergeDraftMirrors()`를 다시 불러도(재기동 흉내) 되살아나지 않는다.
+- [ ] localStorage만 지운 draft는 `mergeDraftMirrors()` 한 번으로 다시 채워지고
+      (승격), 1겹 목록에도 나타난다.
+- [ ] `openIDB`를 강제로 reject시켜도 `mergeDraftMirrors()`가 예외 없이 끝난다
+      (기동이 IDB에 묶이지 않는지 — `req.onblocked` 포함).
+
+**8겹 — 내보내기/가져오기 (`exportDrafts`, `importDraftsFromFile`, `applyImportSelection`)**
+- [ ] `typeof JSZip === 'undefined'`로 만들어도 `exportDrafts(false)`(텍스트만)는
+      정상 동작하고, `exportDrafts(true)`(사진 포함)만 차단된다.
+- [ ] 이 앱에서 만들지 않은 JSON/zip을 가져오면 **아무 것도 바뀌지 않고** 거부된다.
+- [ ] 사진 포함 zip을 왕복(내보내기→가져오기)했을 때 **일반사진 0~3번 슬롯이 이동사진으로
+      바뀌지 않는다**(`resolvePhotoSlot` 직접 조립 금지 — 가장 재발하기 쉬운 실수).
+- [ ] `_default`(번호 없는 draft)를 가져오면 실제 `survey_draft__default`는 건드리지
+      않고 `survey_draft__imported_<...>` 별도 키로 들어와 1겹 목록에 보인다.
+- [ ] 레코드가 있는 번호를 가져오면 `_savedAt`이 가져온 시각으로 갱신돼(`_importedSavedAt`에
+      원본 보존) 5겹 선택 화면이 정상적으로 뜬다(내보낸 기기의 오래된 시계값 때문에
+      묻히지 않는지가 핵심).
