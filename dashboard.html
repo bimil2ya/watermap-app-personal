@@ -255,8 +255,9 @@ body {
     <!-- ===== 지난 작업 포인트 보기 (전체 팀의 완료 포인트를 한 지도에) ===== -->
     <div id="past-view" hidden>
       <div class="card" id="past-map-card">
-        <div class="card-header">
+        <div class="card-header" style="flex-wrap:wrap;justify-content:space-between;">
           <span>지난 작업 포인트 <span id="past-count-label" style="font-weight:500;color:var(--text-sub);"></span></span>
+          <button type="button" onclick="forceRefetchAllPastPoints()" title="현장에서 나중에 정정된 좌표·담당 조 정보가 있다면, 저장해둔 값 대신 서버에서 전부 다시 받아옵니다(평소보다 오래 걸릴 수 있습니다)" style="font-size:12px;padding:4px 8px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);background:#fff;color:var(--text-sub);cursor:pointer;">전체 다시 불러오기</button>
         </div>
         <div style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);">
           <select id="past-team-filter" onchange="openPastPointsMap()" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
@@ -790,13 +791,15 @@ function buildInfoContent(plot, pos, done, completionDateLabel) {
   </div>`;
 }
 
-function closeAllInfoWindows() {
-  mapState.infoWindows.forEach(info => info.close());
-  mapState.infoWindows = [];
-  mapState.dateLabels.forEach(overlay => overlay.setMap(null));
-  mapState.dateLabels = [];
-  mapState.markers.forEach(m => m.setOpacity(1)); // 날짜 선택으로 흐려졌던 마커를 원래대로 복구
+// mapState(팀별 지도)·pastMapState(지난 작업 포인트 지도)가 공통으로 쓰는 정리 로직.
+function closeMapInfoWindows(state) {
+  state.infoWindows.forEach(info => info.close());
+  state.infoWindows = [];
+  state.dateLabels.forEach(overlay => overlay.setMap(null));
+  state.dateLabels = [];
+  state.markers.forEach(m => m.setOpacity(1)); // 날짜 선택으로 흐려졌던 마커를 원래대로 복구
 }
+function closeAllInfoWindows() { closeMapInfoWindows(mapState); }
 
 function resetDateFilterToDefault() {
   const dateFilter = document.getElementById('date-filter');
@@ -938,9 +941,11 @@ async function openMap(team, plots, removedCount) {
   mapLoadingNote.hidden = false;
   const scriptUrl = getScriptUrl();
   const donePoints = markerEntries.filter(e => e.done);
-  const dateResults = await Promise.allSettled(
-    donePoints.map(e => fetchCompletionDate(scriptUrl, e.plot.plotNo))
-  );
+  // Promise.allSettled로 한꺼번에 다 쏘면 완료 포인트가 많은 팀에서 Apps Script
+  // 동시 실행 한도에 걸릴 수 있다(지난 작업 포인트 보기에서 실측된 것과 같은
+  // 문제) — mapWithConcurrency로 동일하게 제한한다.
+  const dateResults = await mapWithConcurrency(donePoints, FETCH_CONCURRENCY_LIMIT,
+    e => fetchCompletionDate(scriptUrl, e.plot.plotNo));
   if (myToken !== mapState.loadToken) return; // 조회 중 다른 팀이 선택됐으면 중단 — 이미 그려진 마커는 그 팀 것이 아니므로 더 손대지 않는다
   mapLoadingNote.hidden = true;
 
@@ -1039,16 +1044,17 @@ function switchDashTab(tab) {
   document.getElementById('past-view').hidden = isTeam;
   document.getElementById('tab-btn-team').classList.toggle('active', isTeam);
   document.getElementById('tab-btn-past').classList.toggle('active', !isTeam);
-  if (!isTeam) openPastPointsMap();
+  if (!isTeam) {
+    openPastPointsMap();
+  }
+  // 지도가 담긴 view가 hidden(display:none)이었다가 다시 보이면, Kakao 지도가
+  // 컨테이너 크기를 display:none 당시 값으로 잘못 들고 있어 타일이 깨져 보일
+  // 수 있다 — 다시 보일 때마다 relayout()으로 크기를 재계산시킨다.
+  const activeMap = isTeam ? mapState.map : pastMapState.map;
+  if (activeMap) activeMap.relayout();
 }
 
-function closeAllPastInfoWindows() {
-  pastMapState.infoWindows.forEach(info => info.close());
-  pastMapState.infoWindows = [];
-  pastMapState.dateLabels.forEach(overlay => overlay.setMap(null));
-  pastMapState.dateLabels = [];
-  pastMapState.markers.forEach(m => m.setOpacity(1));
-}
+function closeAllPastInfoWindows() { closeMapInfoWindows(pastMapState); }
 
 function buildPastInfoContent(plot, pos, completionDateLabel) {
   const kakaoMapUrl = 'https://map.kakao.com/link/map/'
@@ -1068,6 +1074,18 @@ function buildPastInfoContent(plot, pos, completionDateLabel) {
 // 바꾸는 정도로는 서버를 다시 조회하지 않고 이미 받아온 결과를 다시 필터링만 한다.
 // null이면 "아직 한 번도 안 받아왔음"이라는 뜻이라, 이 경우에만 실제로 조회한다.
 let _allPastPoints = null; // [{ plotNo, x, y, basin, _team, isoDate }] | null
+// 마지막으로 실제 서버 조회를 했을 때 조회에 실패해 목록에서 빠진 건수 —
+// 팀 필터만 바꿔서 다시 그릴 때는 갱신하지 않고 마지막 값을 그대로 보여준다.
+let _lastPastFetchFailedCount = 0;
+// 마지막 조회에서 새로 받은 항목을 localStorage에 저장하지 못했는지(용량 초과 등) —
+// 이 경우 이번 세션은 정상이지만 다음에 열 때 다시 느린 전체 조회로 되돌아간다.
+let _lastPastCacheSaveFailed = false;
+// 진행 중인 fetchAllPastPoints 호출을 공유한다 — 새로고침 직후 팀 필터를
+// 바꾸는 등으로 openPastPointsMap이 짧은 시간에 중복 호출되면, 각자 따로
+// localStorage 캐시를 읽고 저장하다가 나중에 끝난 쪽이 먼저 끝난 쪽의 결과를
+// 덮어써 방금 새로 받은 항목을 잃어버릴 수 있다(원격 조회는 초 단위로 느리다).
+// 이미 진행 중인 호출이 있으면 새 fetch를 또 시작하지 않고 그 결과를 같이 쓴다.
+let _pastPointsLoadPromise = null;
 
 // 배열 전체에 비동기 작업을 걸되, 한 번에 최대 `limit`개만 동시에 실행한다.
 // Apps Script 웹앱은 같은 스크립트에 대한 동시 실행 한도가 있어서, 완료
@@ -1096,7 +1114,9 @@ async function mapWithConcurrency(items, limit, fn) {
 // 영구히 남으므로, 그 시트를 그대로 읽는 getCompletedPlots(조사지번호 전체) +
 // getSurveyData(번호별 좌표·조사자·조사일)를 조합해 배정 주기와 무관한 누적
 // 실적을 만든다.
-const PAST_POINTS_FETCH_CONCURRENCY = 8; // Apps Script 동시 실행 한도 안에서 안정적으로 끝나는 값(실측 기반)
+// 지난 작업 포인트 보기뿐 아니라 팀별 지도의 완료일 조회(openMap)에서도 같이 쓴다 —
+// 둘 다 같은 Apps Script 동시 실행 한도를 공유하기 때문이다.
+const FETCH_CONCURRENCY_LIMIT = 8; // Apps Script 동시 실행 한도 안에서 안정적으로 끝나는 값(실측 기반)
 
 // getSurveyData 개별 조회 결과(좌표·유역명·조사자·조사일)를 조사지번호별로
 // localStorage에 영구 저장한다. 한 번 완료된 포인트의 이 정보는 사실상 바뀌지
@@ -1119,8 +1139,32 @@ function loadPastPointsCache() {
   }
 }
 function savePastPointsCache(cache) {
-  try { localStorage.setItem(PAST_POINTS_STORAGE_KEY, JSON.stringify(cache)); }
-  catch (e) { console.warn('지난 작업 포인트 캐시 저장 실패(용량 부족 등) — 다음에 다시 시도됨', e); }
+  try {
+    localStorage.setItem(PAST_POINTS_STORAGE_KEY, JSON.stringify(cache));
+    return true;
+  } catch (e) {
+    // localStorage 용량 초과(QuotaExceededError) 등으로 저장이 실패하면 이번
+    // 세션은 정상 동작하지만, 다음에 열 때는 전부 새로 조회하는 느린 경로로
+    // 되돌아간다 — 콘솔 경고만으로는 관리자가 알아채기 어려우므로 호출자가
+    // 이 반환값을 보고 화면에도 안내할 수 있게 한다.
+    console.warn('지난 작업 포인트 캐시 저장 실패(용량 부족 등) — 다음에 다시 시도됨', e);
+    return false;
+  }
+}
+
+// "새로고침"은 새로 완료된 번호만 받아오도록 캐시를 그대로 둔다(그래야 매번
+// 빨라진다) — 그래서 현장에서 나중에 정정된 좌표·담당 조처럼 이미 캐시된
+// 번호의 값이 바뀌는 드문 경우에는 새로고침만으로 반영되지 않는다. 그런
+// 경우를 위해 캐시를 통째로 비우고 전체를 다시 조회하는 탈출구를 따로 둔다.
+async function forceRefetchAllPastPoints() {
+  if (!confirm('저장해둔 정보를 모두 지우고 서버에서 전체를 다시 받아옵니다. 포인트 수에 따라 몇 분 걸릴 수 있습니다. 계속할까요?')) return;
+  try { localStorage.removeItem(PAST_POINTS_STORAGE_KEY); }
+  catch (e) { console.warn('지난 작업 포인트 캐시 삭제 실패', e); }
+  surveyDataCache.clear(); // getSurveyData의 5분 인메모리 캐시도 같이 비운다 —
+  // 이것까지 안 지우면 방금 정정된 포인트를 "전체 다시 불러오기"로 눌러도
+  // 5분 안에는 여전히 예전 값이 그대로 나온다.
+  _allPastPoints = null;
+  await openPastPointsMap(true);
 }
 
 async function fetchAllPastPoints(scriptUrl, onProgress) {
@@ -1137,10 +1181,11 @@ async function fetchAllPastPoints(scriptUrl, onProgress) {
   const cache = loadPastPointsCache(); // { plotNo: {x,y,basin,_team,isoDate} }
   // 이미 로컬에 있는 번호는 건너뛰고, 서버 완료 목록에 새로 나타난 번호만 조회한다.
   const newPlotNos = completedPlotNos.filter(pn => !cache[pn]);
+  let cacheSaveOk = true; // 새로 조회한 게 없으면(저장 시도 자체가 없으면) 실패로 치지 않는다
 
   if (newPlotNos.length > 0) {
     let done = 0;
-    const results = await mapWithConcurrency(newPlotNos, PAST_POINTS_FETCH_CONCURRENCY, async (pn) => {
+    const results = await mapWithConcurrency(newPlotNos, FETCH_CONCURRENCY_LIMIT, async (pn) => {
       const v = await fetchSurveyData(scriptUrl, pn);
       done++;
       if (onProgress) onProgress(done, newPlotNos.length);
@@ -1157,14 +1202,19 @@ async function fetchAllPastPoints(scriptUrl, onProgress) {
         isoDate: soilRow[3],                     // D열 조사일
       };
     });
-    savePastPointsCache(cache);
+    cacheSaveOk = savePastPointsCache(cache);
   }
 
   // 반환은 항상 '지금 서버 완료 목록에 있는 번호'만 기준으로 한다 — 캐시에
   // 남아있어도 서버 목록에서 빠진 번호(드물지만)는 화면에 노출하지 않는다.
-  return completedPlotNos
+  const points = completedPlotNos
     .map(plotNo => cache[plotNo] ? Object.assign({ plotNo }, cache[plotNo]) : null)
     .filter(Boolean);
+  // completedPlotNos에는 있지만 points에 없는 번호 = 이번에 조회가 실패했거나
+  // (네트워크 오류·동시성 한도 등) 캐시에도 아직 없는 번호. 조용히 누락되면
+  // "완료 N건"이 실제보다 적게 보이는데도 원인을 알 수 없으므로 건수로 안내한다.
+  const failedCount = completedPlotNos.length - points.length;
+  return { points, failedCount, cacheSaveFailed: !cacheSaveOk };
 }
 
 async function openPastPointsMap(forceRefresh) {
@@ -1185,10 +1235,16 @@ async function openPastPointsMap(forceRefresh) {
     try {
       // 조회 건수가 많으면(수백 건) 나눠서 보내느라 몇~수십 초 걸릴 수 있다 —
       // 진행 상황을 숫자로 보여줘서 멈춘 것처럼 보이지 않게 한다.
-      _allPastPoints = await fetchAllPastPoints(getScriptUrl(), (done, total) => {
-        if (myToken !== pastMapState.loadToken) return;
-        loadingNoteEl.textContent = `지난 작업 포인트 조회 중... (${done}/${total})`;
-      });
+      if (!_pastPointsLoadPromise) {
+        _pastPointsLoadPromise = fetchAllPastPoints(getScriptUrl(), (done, total) => {
+          if (myToken !== pastMapState.loadToken) return;
+          loadingNoteEl.textContent = `지난 작업 포인트 조회 중... (${done}/${total})`;
+        }).finally(() => { _pastPointsLoadPromise = null; });
+      }
+      const result = await _pastPointsLoadPromise;
+      _allPastPoints = result.points;
+      _lastPastFetchFailedCount = result.failedCount;
+      _lastPastCacheSaveFailed = result.cacheSaveFailed;
     } catch (err) {
       if (myToken !== pastMapState.loadToken) return;
       document.getElementById('past-map-loading-note').hidden = true;
@@ -1219,7 +1275,9 @@ async function openPastPointsMap(forceRefresh) {
   // textContent에 또 넣으면 "&amp;" 같은 엔티티가 글자 그대로 화면에 찍히는
   // 이중 이스케이프 버그가 된다(다른 곳에서 실제로 있었던 실수).
   document.getElementById('past-count-label').textContent =
-    (selectedTeam ? '(' + selectedTeam + ' · 완료 ' : '(완료 ') + pastPoints.length + '건)';
+    (selectedTeam ? '(' + selectedTeam + ' · 완료 ' : '(완료 ') + pastPoints.length + '건)'
+    + (_lastPastFetchFailedCount > 0 ? ` · ${_lastPastFetchFailedCount}건 조회 실패(새로고침 시 재시도)` : '')
+    + (_lastPastCacheSaveFailed ? ' · 저장 공간 부족으로 다음에 다시 느려질 수 있음' : '');
 
   try {
     await loadKakaoSdk(key);
