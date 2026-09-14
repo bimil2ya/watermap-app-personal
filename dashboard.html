@@ -330,6 +330,19 @@ async function sha256Hex(text) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// 카카오 키를 저장한 뒤(saveKakaoKeyAndReload) location.reload()가 필요한데,
+// 새로고침마다 PIN을 다시 묻으면 방금 키를 입력한 사람에게 불필요한 마찰이다.
+// 진짜 보안이 아니라 가벼운 게이트일 뿐이므로(위 주석 참고), 이 탭 세션 동안은
+// 한 번 통과하면 다시 묻지 않는다 — 탭/창을 닫으면 sessionStorage도 사라진다.
+const PIN_SESSION_KEY = 'dashboard_pin_ok';
+function unlockDashboard() {
+  document.getElementById('lock-box').hidden = true;
+  document.getElementById('main-content').hidden = false;
+  document.getElementById('refresh-btn').hidden = false;
+  try { sessionStorage.setItem(PIN_SESSION_KEY, '1'); } catch (e) { /* 세션 유지는 안 되지만 이번 진입 자체는 문제없다 */ }
+  initDashboard();
+}
+
 async function checkPin() {
   const input = document.getElementById('pin-input');
   const error = document.getElementById('pin-error');
@@ -342,11 +355,8 @@ async function checkPin() {
     return;
   }
   if (inputHash === DASHBOARD_PIN_HASH) {
-    document.getElementById('lock-box').hidden = true;
-    document.getElementById('main-content').hidden = false;
-    document.getElementById('refresh-btn').hidden = false;
     error.style.display = 'none';
-    initDashboard();
+    unlockDashboard();
   } else {
     error.style.display = 'block';
     input.value = '';
@@ -610,8 +620,14 @@ async function loadAll(isManualRefresh) {
     console.error(err);
     errorNote.textContent = '데이터를 불러오지 못했습니다: ' + err.message;
     errorNote.hidden = false;
-    overviewCard.hidden = true;
-    teamListCard.hidden = true;
+    // 최초 로딩 실패는 보여줄 데이터 자체가 없으니 카드를 숨긴다. 반면 수동
+    // 새로고침 실패는 화면에 이미 직전 데이터가 정상 표시돼 있는 상태이므로,
+    // 여기서 숨겨버리면 "새로고침 눌렀더니 있던 데이터까지 사라졌다"가 된다 —
+    // 오류 배너만 추가로 보여주고 기존 화면은 그대로 둔다.
+    if (!isManualRefresh) {
+      overviewCard.hidden = true;
+      teamListCard.hidden = true;
+    }
   } finally {
     loadingNote.hidden = true;
     refreshBtn.disabled = false;
@@ -750,17 +766,43 @@ function escapeHtml(s) {
 const SURVEY_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
 const surveyDataCache = new Map(); // plotNo -> { value: soilRow(array) | null, cachedAt }
 
+// 팀별 지도(openMap)의 완료일 조회와 지난 작업 포인트 조회(fetchAllPastPoints)는
+// 각자 mapWithConcurrency로 자기 배열 안에서만 최대 FETCH_CONCURRENCY_LIMIT개로
+// 제한한다 — 그런데 그 둘이 동시에 실행되면(팀 지도를 연 채 지난 작업 포인트
+// 탭으로 전환하는 등) 합쳐서 최대 그 두 배까지 Apps Script에 동시 요청이 나갈
+// 수 있어, 이 조회의 실제 병목인 getSurveyData 호출 지점에서 앱 전체가 공유하는
+// 전역 세마포어로 한 번 더 조인다 — 어디서 호출하든 합계가 한도를 넘지 않는다.
+// (FETCH_CONCURRENCY_LIMIT는 이 파일 아래쪽에 정의돼 있지만, 아래 두 함수는
+// 실제 호출 시점에만 참조하므로 문제없다.)
+let _activeFetchSlots = 0;
+const _fetchSlotWaiters = [];
+function acquireFetchSlot() {
+  if (_activeFetchSlots < FETCH_CONCURRENCY_LIMIT) {
+    _activeFetchSlots++;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => _fetchSlotWaiters.push(resolve));
+}
+function releaseFetchSlot() {
+  const next = _fetchSlotWaiters.shift();
+  if (next) next(); // 대기자가 있으면 자리를 그대로 넘긴다(카운트는 그대로 유지)
+  else _activeFetchSlots--;
+}
+
 async function fetchSurveyData(scriptUrl, plotNo) {
   const cached = surveyDataCache.get(plotNo);
   if (cached && Date.now() - cached.cachedAt < SURVEY_DATA_CACHE_TTL_MS) {
     return cached.value;
   }
   let value = null;
+  await acquireFetchSlot();
   try {
     const data = await fetchJson(scriptUrl + '?action=getSurveyData&plotNo=' + encodeURIComponent(plotNo));
     if (data && Array.isArray(data.soilRow)) value = data.soilRow;
   } catch (e) {
     value = null;
+  } finally {
+    releaseFetchSlot();
   }
   surveyDataCache.set(plotNo, { value, cachedAt: Date.now() });
   return value;
@@ -1158,6 +1200,17 @@ function savePastPointsCache(cache) {
 // 경우를 위해 캐시를 통째로 비우고 전체를 다시 조회하는 탈출구를 따로 둔다.
 async function forceRefetchAllPastPoints() {
   if (!confirm('저장해둔 정보를 모두 지우고 서버에서 전체를 다시 받아옵니다. 포인트 수에 따라 몇 분 걸릴 수 있습니다. 계속할까요?')) return;
+  // 이미 진행 중인 조회가 있으면(예: 탭을 막 열어서 자동으로 시작된 조회) 그
+  // 조회는 지금 캐시를 지우기도 전에 이미 낡은 캐시를 읽었을 수 있다 — 지금
+  // 캐시를 지우고 openPastPointsMap(true)를 불러도 openPastPointsMap은 새
+  // 조회를 또 시작하지 않고 그 진행 중인(낡은 캐시 기준) 조회 결과를 그대로
+  // 같이 쓰게 되어("_pastPointsLoadPromise" 공유 로직), "전체 다시 불러오기"가
+  // 실제로는 아무것도 새로 받아오지 않을 수 있다. 그래서 캐시를 지우기 전에
+  // 먼저 그 조회가 끝나기를 기다린 뒤(끝나면 _pastPointsLoadPromise가 비워진다)
+  // 진짜로 새 조회를 시작한다.
+  if (_pastPointsLoadPromise) {
+    try { await _pastPointsLoadPromise; } catch (e) { /* 실패했어도 이어서 새로 시도한다 */ }
+  }
   try { localStorage.removeItem(PAST_POINTS_STORAGE_KEY); }
   catch (e) { console.warn('지난 작업 포인트 캐시 삭제 실패', e); }
   surveyDataCache.clear(); // getSurveyData의 5분 인메모리 캐시도 같이 비운다 —
@@ -1414,6 +1467,15 @@ function initDashboard() {
   }
   loadAll(false);
 }
+
+// 스크립트 최상단 실행이 전부 끝난 뒤(모든 함수·상수가 준비된 뒤) 마지막으로
+// 실행한다 — saveKakaoKeyAndReload()의 location.reload() 직후처럼 같은 탭에서
+// 이미 PIN을 통과했던 경우, 다시 묻지 않고 바로 들어간다.
+(function autoUnlockIfAlreadyPassedThisTab() {
+  try {
+    if (sessionStorage.getItem(PIN_SESSION_KEY) === '1') unlockDashboard();
+  } catch (e) { /* sessionStorage 접근 불가 시 평소처럼 PIN 화면을 보여준다 */ }
+})();
 </script>
 </body>
 </html>
