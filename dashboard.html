@@ -125,7 +125,7 @@ body {
 /* ===== 지도 영역 ===== */
 #map, #past-map { width: 100%; height: 50vh; min-height: 320px; background: var(--gray-bg); }
 .map-legend {
-  display: flex; gap: 16px; padding: 10px 16px; font-size: 13px; color: var(--text-sub);
+  display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 10px 16px; font-size: 13px; color: var(--text-sub);
   background: #F8F8F6; border-top: 1.5px solid var(--gray-border);
 }
 .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
@@ -273,7 +273,7 @@ body {
         </div>
         <div id="past-map-loading-note" class="loading-note" style="padding:14px 20px;font-size:13px;" hidden>완료일 확인 중...</div>
         <div id="past-map"></div>
-        <div class="map-legend">
+        <div class="map-legend" id="past-map-legend">
           <span><span class="legend-dot" style="background:#1D9E75;"></span>완료</span>
         </div>
         <div class="no-coord-note" id="past-no-coord-note" hidden></div>
@@ -1126,9 +1126,22 @@ const TEAM_COLOR_PALETTE = [
   '#4E79A7', '#F28E2B', '#B07AA1', '#76B7B2', '#EDC948',
   '#FF9DA7', '#9C755F', '#5B8C5A', '#BAB0AC', '#6E4C9E',
 ];
+// 목록에 없는 팀(예: 조사책임자 셀이 비어 _team === ''인 손상된 레코드)은 팔레트의
+// 첫 색과 겹치지 않도록, 실제 팀 색으로 쓰지 않는 중립 회색을 쓴다 — 이 파일이 이미
+// 쓰는 --gray-text와 같은 값이라 앱의 기존 색 언어와도 어긋나지 않는다.
+const TEAM_COLOR_UNKNOWN = '#6B6966';
 function getTeamColor(team, sortedTeamNames) {
   const idx = sortedTeamNames.indexOf(team);
-  return TEAM_COLOR_PALETTE[(idx < 0 ? 0 : idx) % TEAM_COLOR_PALETTE.length];
+  return idx < 0 ? TEAM_COLOR_UNKNOWN : TEAM_COLOR_PALETTE[idx % TEAM_COLOR_PALETTE.length];
+}
+// "전체 팀"(allTeamsData, 현재 배정)과 "지난 작업 포인트"(_allPastPoints, 누적 완료)는
+// 서로 다른 팀 목록에서 색 인덱스를 계산하면 같은 팀인데도 두 지도에서 색이 달라질 수
+// 있다 — 두 소스를 합친 하나의 목록을 만들어 양쪽 다 이 목록으로 색을 계산하게 한다.
+function getAllKnownTeamNames() {
+  const names = new Set();
+  allTeamsData.forEach(t => { if (t.team) names.add(t.team); });
+  (_allPastPoints || []).forEach(p => { if (p._team) names.add(p._team); });
+  return [...names].sort((a, b) => a.localeCompare(b, 'ko'));
 }
 const _teamMarkerImageCache = new Map(); // "team|done" -> MarkerImage
 function getTeamMarkerImage(team, done, sortedTeamNames) {
@@ -1198,7 +1211,9 @@ async function openAllTeamsMap() {
   // 마커 색과 범례/라벨 색이 서로 어긋나 보이는 상태가 된다. 열 때마다 지운다.
   _teamMarkerImageCache.clear();
 
-  const sortedTeamNames = [...allTeamsData].map(t => t.team).sort((a, b) => a.localeCompare(b, 'ko'));
+  // allTeamsData뿐 아니라 _allPastPoints의 팀도 합쳐야 "지난 작업 포인트" 지도와
+  // 같은 팀이 같은 색을 쓴다(getAllKnownTeamNames 주석 참고).
+  const sortedTeamNames = getAllKnownTeamNames();
 
   const located = [];
   let noCoordCount = 0;
@@ -1615,6 +1630,23 @@ async function openPastPointsMap(forceRefresh) {
   const pastPoints = selectedTeam
     ? _allPastPoints.filter(p => p._team === selectedTeam)
     : _allPastPoints;
+
+  // 드롭다운용 sortedTeamNames(위, "완료 실적이 있는 팀만")와는 별개로, 색상
+  // 계산에는 "전체 팀" 지도와 같은 통합 목록을 쓴다 — 그래야 같은 팀이 두 지도에서
+  // 같은 색으로 보인다. 마커·범례·날짜 라벨 색 전부 이걸로 계산해야 한다.
+  const canonicalTeamNames = getAllKnownTeamNames();
+
+  // 범례는 드롭다운의 전체 팀 목록(sortedTeamNames)이 아니라 지금 실제로 지도에
+  // 그려질 pastPoints 기준으로 만든다 — 특정 팀으로 필터링돼 있으면 그 팀 하나만
+  // 나와야 한다(전체 팀 목록을 그대로 쓰면 필터링해도 범례엔 다 나오는 불일치가
+  // 생긴다). 색은 이 지도만의 목록이 아니라 canonicalTeamNames로 계산해야
+  // "전체 팀" 지도와 같은 색이 나온다.
+  const visibleTeamNames = [...new Set(pastPoints.map(p => p._team).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  document.getElementById('past-map-legend').innerHTML = visibleTeamNames.map(t =>
+    `<span><span class="legend-dot" style="background:${getTeamColor(t, canonicalTeamNames)};"></span>${escapeHtml(shortTeamName(t))}</span>`
+  ).join('');
+
   // textContent 대입이므로 escapeHtml()을 쓰지 않는다 — 이미 이스케이프된 문자열을
   // textContent에 또 넣으면 "&amp;" 같은 엔티티가 글자 그대로 화면에 찍히는
   // 이중 이스케이프 버그가 된다(다른 곳에서 실제로 있었던 실수).
@@ -1661,6 +1693,10 @@ async function openPastPointsMap(forceRefresh) {
   closeAllPastInfoWindows();
   pastDateFilterSelect.value = '';
   dateFilterRow.hidden = true;
+  // "전체 팀" 지도와 같은 이유로 열 때마다 비운다(openAllTeamsMap 주석 참고) — 팀
+  // 구성이 바뀌면 캐시된 옛 색이 남아 마커·범례·라벨 색이 서로 어긋나는 걸 막는다.
+  // (canonicalTeamNames 자체는 위에서 이미 한 번 계산해뒀다 — 범례가 그걸 먼저 쓴다.)
+  _teamMarkerImageCache.clear();
 
   if (located.length === 0) {
     pastMapState.map = null;
@@ -1703,7 +1739,7 @@ async function openPastPointsMap(forceRefresh) {
     const position = new kakao.maps.LatLng(pos.lat, pos.lng);
     bounds.extend(position);
     const label = formatKoreanDate(plot.isoDate);
-    const marker = new kakao.maps.Marker({ position, map: pastMapState.map, image: getDotMarkerImage(true) });
+    const marker = new kakao.maps.Marker({ position, map: pastMapState.map, image: getTeamMarkerImage(plot._team, true, canonicalTeamNames) });
     const info = new kakao.maps.InfoWindow({ content: buildPastInfoContent(plot, pos, label) });
     kakao.maps.event.addListener(marker, 'click', () => {
       closeAllPastInfoWindows();
@@ -1741,10 +1777,13 @@ async function openPastPointsMap(forceRefresh) {
     const selectedItems = groupsByDate[dateLabel]?.items || [];
     const selectedMarkers = new Set(selectedItems.map(({ marker }) => marker));
     pastMapState.markers.forEach(m => { if (!selectedMarkers.has(m)) m.setOpacity(0.15); });
-    selectedItems.forEach(({ marker }) => {
+    // 이미 날짜로 골라낸 상태라 모든 점에 같은 날짜를 또 붙이는 건 정보가 없다
+    // (여러 팀이 같은 날 완료한 점들이 뒤섞여 보일 때 실제로 필요한 건 "어느
+    // 팀"인지) — 라벨을 팀명(짧은 이름)으로, 배경색도 그 팀 마커와 같은 색으로.
+    selectedItems.forEach(({ marker, plot }) => {
       const overlay = new kakao.maps.CustomOverlay({
         position: marker.getPosition(), yAnchor: 1.6,
-        content: `<div style="background:#0A5C45;color:#fff;font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.35);">${escapeHtml(dateLabel)}</div>`,
+        content: `<div style="background:${getTeamColor(plot._team, canonicalTeamNames)};color:#fff;font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.35);">${escapeHtml(shortTeamName(plot._team))}</div>`,
       });
       overlay.setMap(pastMapState.map);
       pastMapState.dateLabels.push(overlay);
