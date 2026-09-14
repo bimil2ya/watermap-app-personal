@@ -1214,32 +1214,28 @@ async function forceRefetchAllPastPoints() {
   const btn = document.getElementById('force-refetch-btn');
   if (btn) btn.disabled = true;
   try {
-    await forceRefetchAllPastPointsInner();
+    // 이미 진행 중인 조회가 있으면(예: 탭을 막 열어서 자동으로 시작된 조회) 그
+    // 조회는 지금 캐시를 지우기도 전에 이미 낡은 캐시를 읽었을 수 있다 — 지금
+    // 캐시를 지우고 openPastPointsMap(true)를 불러도 openPastPointsMap은 새
+    // 조회를 또 시작하지 않고 그 진행 중인(낡은 캐시 기준) 조회 결과를 그대로
+    // 같이 쓰게 되어("_pastPointsLoadPromise" 공유 로직), "전체 다시 불러오기"가
+    // 실제로는 아무것도 새로 받아오지 않을 수 있다. 그래서 캐시를 지우기 전에
+    // 먼저 그 조회가 끝나기를 기다린 뒤(끝나면 _pastPointsLoadPromise가 비워진다)
+    // 진짜로 새 조회를 시작한다.
+    if (_pastPointsLoadPromise) {
+      try { await _pastPointsLoadPromise; } catch (e) { /* 실패했어도 이어서 새로 시도한다 */ }
+    }
+    try { localStorage.removeItem(PAST_POINTS_STORAGE_KEY); }
+    catch (e) { console.warn('지난 작업 포인트 캐시 삭제 실패', e); }
+    surveyDataCache.clear(); // getSurveyData의 5분 인메모리 캐시도 같이 비운다 —
+    // 이것까지 안 지우면 방금 정정된 포인트를 "전체 다시 불러오기"로 눌러도
+    // 5분 안에는 여전히 예전 값이 그대로 나온다.
+    _allPastPoints = null;
+    await openPastPointsMap(true);
   } finally {
     _forceRefetchInProgress = false;
     if (btn) btn.disabled = false;
   }
-}
-
-async function forceRefetchAllPastPointsInner() {
-  // 이미 진행 중인 조회가 있으면(예: 탭을 막 열어서 자동으로 시작된 조회) 그
-  // 조회는 지금 캐시를 지우기도 전에 이미 낡은 캐시를 읽었을 수 있다 — 지금
-  // 캐시를 지우고 openPastPointsMap(true)를 불러도 openPastPointsMap은 새
-  // 조회를 또 시작하지 않고 그 진행 중인(낡은 캐시 기준) 조회 결과를 그대로
-  // 같이 쓰게 되어("_pastPointsLoadPromise" 공유 로직), "전체 다시 불러오기"가
-  // 실제로는 아무것도 새로 받아오지 않을 수 있다. 그래서 캐시를 지우기 전에
-  // 먼저 그 조회가 끝나기를 기다린 뒤(끝나면 _pastPointsLoadPromise가 비워진다)
-  // 진짜로 새 조회를 시작한다.
-  if (_pastPointsLoadPromise) {
-    try { await _pastPointsLoadPromise; } catch (e) { /* 실패했어도 이어서 새로 시도한다 */ }
-  }
-  try { localStorage.removeItem(PAST_POINTS_STORAGE_KEY); }
-  catch (e) { console.warn('지난 작업 포인트 캐시 삭제 실패', e); }
-  surveyDataCache.clear(); // getSurveyData의 5분 인메모리 캐시도 같이 비운다 —
-  // 이것까지 안 지우면 방금 정정된 포인트를 "전체 다시 불러오기"로 눌러도
-  // 5분 안에는 여전히 예전 값이 그대로 나온다.
-  _allPastPoints = null;
-  await openPastPointsMap(true);
 }
 
 async function fetchAllPastPoints(scriptUrl, onProgress) {
