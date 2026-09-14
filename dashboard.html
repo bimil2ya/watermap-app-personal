@@ -1191,6 +1191,12 @@ async function openAllTeamsMap() {
   mapState.teamLabels.forEach(o => o.setMap(null));
   mapState.teamLabels = [];
   dateFilterRow.hidden = true; // 이 보기엔 날짜 필터가 없다
+  // 팀 색상은 정렬된 팀 목록에서의 순서로 정해지는데(getTeamColor), 새로고침 사이
+  // 팀이 추가/삭제되면 같은 팀이라도 순서가 바뀌어 색이 달라질 수 있다. 마커 이미지
+  // 캐시(_teamMarkerImageCache)를 여기서 안 비우면, 이미 캐시된 팀은 예전 색 마커를
+  // 계속 쓰는데 범례·라벨은 매번 새로 계산돼 새 색을 보여줘서 — 같은 팀인데
+  // 마커 색과 범례/라벨 색이 서로 어긋나 보이는 상태가 된다. 열 때마다 지운다.
+  _teamMarkerImageCache.clear();
 
   const sortedTeamNames = [...allTeamsData].map(t => t.team).sort((a, b) => a.localeCompare(b, 'ko'));
 
@@ -1253,8 +1259,16 @@ async function openAllTeamsMap() {
     mapState.map = new kakao.maps.Map(mapEl, { center, level: 9 }); // 여러 팀이 흩어져 있을 수 있어 팀 지도보다 한 단계 더 넓게 시작
   }
   if (isNewMap) {
+    // openMap()과 mapState.map을 공유하므로, 이 지도가 "전체 팀"으로 먼저 생성되면
+    // (isNewMap이 이번에만 true) 이 리스너가 지도의 유일한 클릭 리스너로 남는다 —
+    // 이후 사용자가 특정 팀으로 전환해 날짜 필터를 골랐다가 지도를 클릭해도, 여기서
+    // resetDateFilterToDefault()를 안 부르면 드롭다운 값이 지워지지 않고 남는다.
+    // "전체 팀"에는 날짜 필터 자체가 없어(#date-filter-row 항상 숨김) 이 호출이
+    // 그쪽에서는 그냥 아무 효과가 없다 — 두 모드 어느 쪽이 먼저 지도를 만들어도
+    // 안전하도록 openMap()의 리스너와 동일하게 둘 다 호출한다.
     kakao.maps.event.addListener(mapState.map, 'click', () => {
       closeAllInfoWindows();
+      resetDateFilterToDefault();
     });
   }
 
