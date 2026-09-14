@@ -934,6 +934,13 @@ async function openMap(team, plots, removedCount) {
   if (mapState.map) {
     // 이미 지도가 떠 있으면(팀 전환) 재사용 — 매번 새로 만들면 반복 전환 시
     // 불필요한 재초기화로 저사양 기기에서 끊김이 생긴다.
+    // "← 팀 목록으로"(closeMap)로 지도를 닫아뒀다가(map-card.hidden=true) 다시
+    // 이 팀·다른 팀을 열면, 그 사이 컨테이너가 display:none이었던 동안 지도가
+    // 들고 있던 크기 정보가 낡아있을 수 있다(탭 전환 시 relayout을 걸어주는
+    // switchDashTab의 로직과 같은 이유) — 재사용 경로에서도 항상 relayout으로
+    // 지금 보이는 실제 크기를 다시 읽게 한다. 이미 올바른 크기였다면 아무
+    // 부작용 없이 그냥 다시 계산할 뿐이다.
+    mapState.map.relayout();
     mapState.map.setCenter(center);
   } else {
     mapEl.innerHTML = ''; // "위치 정보 없음" 안내 텍스트가 남아있을 수 있으므로 비움
@@ -1097,8 +1104,20 @@ function switchDashTab(tab) {
   // 지도가 담긴 view가 hidden(display:none)이었다가 다시 보이면, Kakao 지도가
   // 컨테이너 크기를 display:none 당시 값으로 잘못 들고 있어 타일이 깨져 보일
   // 수 있다 — 다시 보일 때마다 relayout()으로 크기를 재계산시킨다.
-  const activeMap = isTeam ? mapState.map : pastMapState.map;
-  if (activeMap) activeMap.relayout();
+  //
+  // 팀 지도는 team-view 탭 자체의 hidden과 별개로, "← 팀 목록으로"(closeMap)로
+  // 닫아뒀을 때만 켜지는 map-card 자신의 hidden 상태도 있다 — 탭만 보고
+  // relayout을 부르면, team-view는 다시 보이지만 map-card는 여전히 닫혀 있어
+  // 실제로는 아직 화면에 없는(0×0) 컨테이너에 relayout을 거는 꼴이 되어, 그
+  // 다음 팀을 열었을 때(재사용 경로라 relayout이 다시 걸리지 않음) 지도가
+  // 찌그러진 채로 남을 수 있다. 지난 작업 포인트 지도는 그런 별도 닫기 상태가
+  // 없어(past-map-card는 항상 보임) past-view가 보이는지만 확인하면 된다.
+  if (isTeam) {
+    const mapCard = document.getElementById('map-card');
+    if (mapState.map && mapCard && !mapCard.hidden) mapState.map.relayout();
+  } else if (pastMapState.map) {
+    pastMapState.map.relayout();
+  }
 }
 
 function closeAllPastInfoWindows() { closeMapInfoWindows(pastMapState); }
@@ -1290,18 +1309,20 @@ async function fetchAllPastPoints(scriptUrl, onProgress) {
 
 async function openPastPointsMap(forceRefresh) {
   const myToken = ++pastMapState.loadToken;
-  document.getElementById('past-map-loading-note').hidden = false;
 
   const key = getKakaoKey();
   if (!key) {
-    document.getElementById('past-map-loading-note').hidden = true;
     document.getElementById('key-setup').hidden = false;
     document.getElementById('key-setup').scrollIntoView({ behavior: 'smooth' });
     return;
   }
 
   if (forceRefresh || _allPastPoints === null) {
+    // 실제로 서버 조회가 필요할 때만 로딩 문구를 띄운다 — 캐시를 그대로 쓰는
+    // 호출(팀 필터만 바꾸는 등)까지 무조건 띄웠다가 곧바로 숨기면, 지난번
+    // 조회 때 남은 문구("...조회 중 (57/57)")가 아주 잠깐 다시 깜빡여 보인다.
     const loadingNoteEl = document.getElementById('past-map-loading-note');
+    loadingNoteEl.hidden = false;
     loadingNoteEl.textContent = '지난 작업 포인트 목록을 불러오는 중...';
     try {
       // 조회 건수가 많으면(수백 건) 나눠서 보내느라 몇~수십 초 걸릴 수 있다 —
