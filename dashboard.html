@@ -257,7 +257,7 @@ body {
       <div class="card" id="past-map-card">
         <div class="card-header" style="flex-wrap:wrap;justify-content:space-between;">
           <span>지난 작업 포인트 <span id="past-count-label" style="font-weight:500;color:var(--text-sub);"></span></span>
-          <button type="button" onclick="forceRefetchAllPastPoints()" title="현장에서 나중에 정정된 좌표·담당 조 정보가 있다면, 저장해둔 값 대신 서버에서 전부 다시 받아옵니다(평소보다 오래 걸릴 수 있습니다)" style="font-size:12px;padding:4px 8px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);background:#fff;color:var(--text-sub);cursor:pointer;">전체 다시 불러오기</button>
+          <button type="button" id="force-refetch-btn" onclick="forceRefetchAllPastPoints()" title="현장에서 나중에 정정된 좌표·담당 조 정보가 있다면, 저장해둔 값 대신 서버에서 전부 다시 받아옵니다(평소보다 오래 걸릴 수 있습니다)" style="font-size:12px;padding:4px 8px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);background:#fff;color:var(--text-sub);cursor:pointer;">전체 다시 불러오기</button>
         </div>
         <div style="padding:8px 16px;border-bottom:1.5px solid var(--gray-border);">
           <select id="past-team-filter" onchange="openPastPointsMap()" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-border);border-radius:var(--radius-sm);font-size:14px;">
@@ -339,7 +339,12 @@ function unlockDashboard() {
   document.getElementById('lock-box').hidden = true;
   document.getElementById('main-content').hidden = false;
   document.getElementById('refresh-btn').hidden = false;
-  try { sessionStorage.setItem(PIN_SESSION_KEY, '1'); } catch (e) { /* 세션 유지는 안 되지만 이번 진입 자체는 문제없다 */ }
+  // '1' 같은 고정값이 아니라 지금 통과한 PIN의 해시 자체를 저장해둔다 —
+  // 나중에 관리자가 PIN을 바꿔 배포하면(DASHBOARD_PIN_HASH 값이 달라지면)
+  // 예전에 통과해둔 세션은 새 해시와 더 이상 일치하지 않아 자동으로
+  // 다시 PIN을 묻게 된다. 고정값이었다면 PIN을 바꿔도 이미 열려 있던
+  // 탭은 탭을 닫기 전까지 계속 통과해버린다.
+  try { sessionStorage.setItem(PIN_SESSION_KEY, DASHBOARD_PIN_HASH); } catch (e) { /* 세션 유지는 안 되지만 이번 진입 자체는 문제없다 */ }
   initDashboard();
 }
 
@@ -1128,6 +1133,10 @@ let _lastPastCacheSaveFailed = false;
 // 덮어써 방금 새로 받은 항목을 잃어버릴 수 있다(원격 조회는 초 단위로 느리다).
 // 이미 진행 중인 호출이 있으면 새 fetch를 또 시작하지 않고 그 결과를 같이 쓴다.
 let _pastPointsLoadPromise = null;
+// "전체 다시 불러오기" 버튼 연타 방지 — confirm()이 동기라 연타하면 각자
+// confirm 창을 띄우고, 앞선 실행이 끝나자마자 뒤이어 또 캐시를 지우고 전체를
+// 다시 조회하는 식으로 같은 작업이 그대로 두 번 실행될 수 있다.
+let _forceRefetchInProgress = false;
 
 // 배열 전체에 비동기 작업을 걸되, 한 번에 최대 `limit`개만 동시에 실행한다.
 // Apps Script 웹앱은 같은 스크립트에 대한 동시 실행 한도가 있어서, 완료
@@ -1199,7 +1208,20 @@ function savePastPointsCache(cache) {
 // 번호의 값이 바뀌는 드문 경우에는 새로고침만으로 반영되지 않는다. 그런
 // 경우를 위해 캐시를 통째로 비우고 전체를 다시 조회하는 탈출구를 따로 둔다.
 async function forceRefetchAllPastPoints() {
+  if (_forceRefetchInProgress) return; // 이미 실행 중 — 연타 무시
   if (!confirm('저장해둔 정보를 모두 지우고 서버에서 전체를 다시 받아옵니다. 포인트 수에 따라 몇 분 걸릴 수 있습니다. 계속할까요?')) return;
+  _forceRefetchInProgress = true;
+  const btn = document.getElementById('force-refetch-btn');
+  if (btn) btn.disabled = true;
+  try {
+    await forceRefetchAllPastPointsInner();
+  } finally {
+    _forceRefetchInProgress = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function forceRefetchAllPastPointsInner() {
   // 이미 진행 중인 조회가 있으면(예: 탭을 막 열어서 자동으로 시작된 조회) 그
   // 조회는 지금 캐시를 지우기도 전에 이미 낡은 캐시를 읽었을 수 있다 — 지금
   // 캐시를 지우고 openPastPointsMap(true)를 불러도 openPastPointsMap은 새
@@ -1473,7 +1495,7 @@ function initDashboard() {
 // 이미 PIN을 통과했던 경우, 다시 묻지 않고 바로 들어간다.
 (function autoUnlockIfAlreadyPassedThisTab() {
   try {
-    if (sessionStorage.getItem(PIN_SESSION_KEY) === '1') unlockDashboard();
+    if (sessionStorage.getItem(PIN_SESSION_KEY) === DASHBOARD_PIN_HASH) unlockDashboard();
   } catch (e) { /* sessionStorage 접근 불가 시 평소처럼 PIN 화면을 보여준다 */ }
 })();
 </script>
